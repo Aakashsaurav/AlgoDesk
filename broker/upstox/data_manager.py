@@ -690,6 +690,8 @@ def _max_date_from_parquet(file_path: Path) -> Optional[date]:
                             max_ts = rg_max
                 if max_ts is not None:
                     # max_ts may be a datetime or Timestamp; normalise to date
+                    if hasattr(max_ts, "tzinfo") and max_ts.tzinfo is not None:
+                        max_ts = max_ts.astimezone(_IST_TZ)
                     if hasattr(max_ts, "date"):
                         return max_ts.date()
                     return max_ts

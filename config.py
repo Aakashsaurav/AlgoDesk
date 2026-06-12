@@ -135,11 +135,30 @@ class AppConfig:
     # ── Data storage paths ───────────────────────────────────────────────────
     DATA_DIR:    Path = BASE_DIR / "data"
     OHLCV_DIR:   Path = DATA_DIR / "ohlcv"
+    SQLITE_DIR:  Path = DATA_DIR / "sqlite"
+    LIVE_TICK_DIR: Path = DATA_DIR / "live_ticks"
+    UNIVERSE_DIR: Path = DATA_DIR / "universes"
+
+    # Legacy flat paths — used by broker/upstox/data_manager.py.
+    # New code should use DataManager which builds hierarchical paths:
+    #   ohlcv/<exchange>/<instrument_type>/<timeframe>/<symbol>/
     DAILY_DIR:   Path = OHLCV_DIR / "daily"
     MINUTE_DIR:  Path = OHLCV_DIR / "minute"
     WEEKLY_DIR:  Path = OHLCV_DIR / "weekly"
-    SQLITE_DIR:  Path = DATA_DIR / "sqlite"
-    LIVE_TICK_DIR: Path = DATA_DIR / "live_ticks"
+
+    # ── Data provider settings ───────────────────────────────────────────────
+    YFINANCE_RATE_LIMIT_PER_SEC: float = float(
+        os.getenv("YFINANCE_RATE_LIMIT_PER_SEC", "2.0")
+    )
+    YFINANCE_MAX_CONCURRENT: int = int(
+        os.getenv("YFINANCE_MAX_CONCURRENT", "3")
+    )
+    UPSTOX_RATE_LIMIT_PER_SEC: float = float(
+        os.getenv("UPSTOX_RATE_LIMIT_PER_SEC", "25.0")
+    )
+    UPSTOX_RATE_LIMIT_PER_MIN: float = float(
+        os.getenv("UPSTOX_RATE_LIMIT_PER_MIN", "500.0")
+    )
 
     # ── Database paths ───────────────────────────────────────────────────────
     METADATA_DB:   Path = SQLITE_DIR / "metadata.db"
@@ -167,9 +186,8 @@ class AppConfig:
     def _create_directories(self) -> None:
         """Ensure all required directories exist at startup."""
         for d in (
-            self.DATA_DIR, self.OHLCV_DIR, self.DAILY_DIR,
-            self.MINUTE_DIR, self.WEEKLY_DIR, self.SQLITE_DIR,
-            self.LIVE_TICK_DIR,
+            self.DATA_DIR, self.OHLCV_DIR, self.SQLITE_DIR,
+            self.LIVE_TICK_DIR, self.UNIVERSE_DIR,
             self.BASE_DIR / "logs",
         ):
             try:

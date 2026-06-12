@@ -61,7 +61,7 @@ venv.bak/
 #data/ohlcv/
 #data/live_ticks/
 #data/sqlite/
-data/
+#data/
 
 # ── Logs ──────────────────────────────────────────────────────────────────────
 logs/
@@ -97,9 +97,10 @@ tests/
 *.csv
 *.xlsx
 *.pdf
+*.parquet
 
 # ── Miscellaneous Files ─────────────────────────────────────────────────────────────
 *.txt
-Chatgpt_response.md
+artifacts/
+.mdignore
 orb_backtest.py
-Project_instruction.md
