@@ -2,6 +2,10 @@
 indicators/helpers.py
 ---------------------
 Signal and candlestick helper utilities.
+
+Note on Caching: These functions do not use @functools.lru_cache directly.
+Memoization/caching is handled exclusively by the IndicatorEngine to
+prevent memory leaks on large live-streaming datasets.
 """
 
 from __future__ import annotations
@@ -11,22 +15,26 @@ import pandas as pd
 
 def crossover(series1: pd.Series, series2: pd.Series) -> pd.Series:
     """True on the bar where series1 crosses above series2."""
-    return (series1 > series2) & (series1.shift(1) <= series2.shift(1))
+    valid = series1.notna() & series2.notna() & series1.shift(1).notna() & series2.shift(1).notna()
+    return (series1 > series2) & (series1.shift(1) <= series2.shift(1)) & valid
 
 
 def crossunder(series1: pd.Series, series2: pd.Series) -> pd.Series:
     """True on the bar where series1 crosses below series2."""
-    return (series1 < series2) & (series1.shift(1) >= series2.shift(1))
+    valid = series1.notna() & series2.notna() & series1.shift(1).notna() & series2.shift(1).notna()
+    return (series1 < series2) & (series1.shift(1) >= series2.shift(1)) & valid
 
 
 def above_threshold(series: pd.Series, level: float) -> pd.Series:
     """True on the bar where series crosses above a scalar threshold."""
-    return (series > level) & (series.shift(1) <= level)
+    valid = series.notna() & series.shift(1).notna()
+    return (series > level) & (series.shift(1) <= level) & valid
 
 
 def below_threshold(series: pd.Series, level: float) -> pd.Series:
     """True on the bar where series crosses below a scalar threshold."""
-    return (series < level) & (series.shift(1) >= level)
+    valid = series.notna() & series.shift(1).notna()
+    return (series < level) & (series.shift(1) >= level) & valid
 
 
 def candle_body(open_: pd.Series, close: pd.Series) -> pd.Series:

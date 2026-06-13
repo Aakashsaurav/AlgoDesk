@@ -2,6 +2,10 @@
 indicators/volume.py
 --------------------
 Volume-based indicators.
+
+Note on Caching: These functions do not use @functools.lru_cache directly.
+Memoization/caching is handled exclusively by the IndicatorEngine to
+prevent memory leaks on large live-streaming datasets.
 """
 
 from __future__ import annotations
@@ -21,7 +25,13 @@ def vwap(
 
     For intraday data with a DatetimeIndex, VWAP resets each trading day.
     For non-datetime indices, it is computed across the full series.
+
+    NOTE ON TIMEZONES: Ensure the DatetimeIndex is timezone-aware (e.g. IST)
+    before calling vwap, so that `index.date` correctly identifies market days.
     """
+    if close.empty:
+        return pd.Series(dtype=float, index=close.index, name="VWAP")
+
     typical_price = (high + low + close) / 3
     price_volume = typical_price * volume
 
@@ -40,6 +50,9 @@ def vwap(
 
 def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
     """On Balance Volume."""
+    if close.empty:
+        return pd.Series(dtype=float, index=close.index, name="OBV")
+
     direction = np.sign(close.diff().fillna(0.0))
     result = (direction * volume).cumsum()
     result.name = "OBV"

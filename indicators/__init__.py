@@ -34,11 +34,13 @@ _LAZY_EXPORTS = {
     "atr": ("indicators.volatility", "atr"),
     "bollinger_bands": ("indicators.volatility", "bollinger_bands"),
     "keltner_channels": ("indicators.volatility", "keltner_channels"),
+    "bb_squeeze": ("indicators.volatility", "bb_squeeze"),
     "supertrend": ("indicators.trend", "supertrend"),
     "adx": ("indicators.trend", "adx"),
     "obv": ("indicators.volume", "obv"),
     "zscore": ("indicators.statistics", "zscore"),
     "rolling_correlation": ("indicators.statistics", "rolling_correlation"),
+    "rolling_beta": ("indicators.statistics", "rolling_beta"),
     "spread": ("indicators.statistics", "spread"),
     "half_life": ("indicators.statistics", "half_life"),
     "cointegration_test": ("indicators.statistics", "cointegration_test"),
@@ -52,6 +54,16 @@ _LAZY_EXPORTS = {
     "is_red": ("indicators.helpers", "is_red"),
     "upper_shadow": ("indicators.helpers", "upper_shadow"),
     "lower_shadow": ("indicators.helpers", "lower_shadow"),
+    "relative_strength": ("indicators.relative_strength", "relative_strength"),
+    "relative_strength_rank": ("indicators.relative_strength", "relative_strength_rank"),
+    # Future namespaces
+    "IndicatorRegistry": ("indicators.registry", "IndicatorRegistry"),
+    "ExpressionParser": ("indicators.expression", "ExpressionParser"),
+    "CustomIndicatorSpec": ("indicators.custom", "CustomIndicatorSpec"),
+    "CustomIndicatorLoader": ("indicators.custom", "CustomIndicatorLoader"),
+    "scan_all_candlestick": ("indicators.patterns", "scan_all_candlestick"),
+    "scan_all_chart": ("indicators.patterns", "scan_all_chart"),
+    "trend_structure": ("indicators.patterns", "trend_structure"),
 }
 
 

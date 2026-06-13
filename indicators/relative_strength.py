@@ -16,10 +16,18 @@ USAGE:
 
     rs = relative_strength(stock_close, nifty_close, period=55)
     signal = rs > 0   # True when stock outperforms NIFTY over last 55 bars
+
+Note on Caching: These functions do not use @functools.lru_cache directly.
+Memoization/caching is handled exclusively by the IndicatorEngine to
+prevent memory leaks on large live-streaming datasets.
 """
+
+from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+
+__all__ = ["relative_strength", "relative_strength_rank"]
 
 
 def relative_strength(
@@ -65,7 +73,7 @@ def relative_strength(
     stock_close, benchmark_close = stock_close.align(benchmark_close, join="inner")
 
     if stock_close.empty:
-        raise ValueError("stock_close and benchmark_close have no overlapping dates.")
+        return pd.Series(dtype=float, name=f"RS_{period}")
 
     # Rolling ratio: current / lagged
     stock_return     = stock_close / stock_close.shift(period)

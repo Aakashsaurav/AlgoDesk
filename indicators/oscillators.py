@@ -4,6 +4,10 @@ indicators/oscillators.py
 Momentum and oscillator indicators.
 All functions take pandas Series/DataFrame and return pandas Series.
 
+Note on Caching: These functions do not use @functools.lru_cache directly.
+Memoization/caching is handled exclusively by the IndicatorEngine to
+prevent memory leaks on large live-streaming datasets.
+
 INDICATORS:
     rsi(series, period)                        Relative Strength Index
     stochastic(high, low, close, k, d)         Stochastic %K and %D
@@ -12,9 +16,13 @@ INDICATORS:
     cci(high, low, close, period)              Commodity Channel Index
 """
 
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 from indicators.moving_averages import ema, sma
+
+__all__ = ["rsi", "stochastic", "macd", "roc", "cci"]
 
 
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
@@ -112,6 +120,9 @@ def stochastic(
         stoch = stochastic(df["high"], df["low"], df["close"])
         buy_signal = (stoch["stoch_k"] < 20) & (stoch["stoch_k"] > stoch["stoch_d"])
     """
+    if close.empty:
+        return pd.DataFrame(columns=["stoch_k", "stoch_d"], index=close.index, dtype=float)
+
     lowest_low   = low.rolling(window=k_period, min_periods=k_period).min()
     highest_high = high.rolling(window=k_period, min_periods=k_period).max()
 
@@ -159,6 +170,9 @@ def macd(
         m = macd(df["close"])
         crossover_up = (m["macd"] > m["signal"]) & (m["macd"].shift(1) <= m["signal"].shift(1))
     """
+    if series.empty:
+        return pd.DataFrame(columns=["macd", "signal", "histogram"], index=series.index, dtype=float)
+
     if fast_period >= slow_period:
         raise ValueError(
             f"fast_period ({fast_period}) must be less than "
@@ -173,8 +187,8 @@ def macd(
 
     return pd.DataFrame({
         "macd":      macd_line,
-        "signal":    signal_line,
         "histogram": histogram,
+        "signal":    signal_line,
     }, index=series.index)
 
 
@@ -197,6 +211,8 @@ def roc(series: pd.Series, period: int = 12) -> pd.Series:
     Example:
         roc_12 = roc(df["close"], 12)
     """
+    if series.empty:
+        return pd.Series(dtype=float, index=series.index)
     if period < 1:
         raise ValueError(f"period must be >= 1, got {period}")
     return series.pct_change(periods=period) * 100
@@ -230,6 +246,9 @@ def cci(
     Example:
         cci_20 = cci(df["high"], df["low"], df["close"], 20)
     """
+    if close.empty:
+        return pd.Series(dtype=float, index=close.index)
+
     typical_price = (high + low + close) / 3
     tp_sma = sma(typical_price, period)
 

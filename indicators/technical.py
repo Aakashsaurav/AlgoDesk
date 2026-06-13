@@ -10,7 +10,16 @@ Canonical implementations live in the modular indicator files:
 
 from __future__ import annotations
 
+import warnings
 import pandas as pd
+
+warnings.warn(
+    "The `indicators.technical` module is deprecated and will be removed in Phase 3. "
+    "Please import indicators directly from their respective modules "
+    "(e.g., `from indicators.moving_averages import sma`).",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 from indicators.helpers import (
     above_threshold,

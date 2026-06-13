@@ -5,6 +5,10 @@ Pure functions for moving average indicators.
 All functions take a pandas Series and return a pandas Series.
 No state, no side effects — safe to use in both backtester and live bot.
 
+Note on Caching: These functions do not use @functools.lru_cache directly.
+Memoization/caching is handled exclusively by the IndicatorEngine to
+prevent memory leaks on large live-streaming datasets.
+
 INDICATORS:
     sma(series, period)            Simple Moving Average
     ema(series, period)            Exponential Moving Average
@@ -13,8 +17,12 @@ INDICATORS:
     vwap(high, low, close, volume) Volume Weighted Avg Price (intraday)
 """
 
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
+
+__all__ = ["sma", "ema", "dema", "wma", "vwap"]
 
 
 def sma(series: pd.Series, period: int) -> pd.Series:
@@ -34,8 +42,13 @@ def sma(series: pd.Series, period: int) -> pd.Series:
     Example:
         sma_20 = sma(df["close"], 20)
     """
+    if series.empty:
+        return pd.Series(dtype=float, index=series.index)
     if period < 1:
         raise ValueError(f"period must be >= 1, got {period}")
+    if period > len(series):
+        return pd.Series(np.nan, index=series.index)
+        
     return series.rolling(window=period, min_periods=period).mean()
 
 
@@ -61,8 +74,13 @@ def ema(series: pd.Series, period: int, adjust: bool = False) -> pd.Series:
     Example:
         ema_50 = ema(df["close"], 50)
     """
+    if series.empty:
+        return pd.Series(dtype=float, index=series.index)
     if period < 1:
         raise ValueError(f"period must be >= 1, got {period}")
+    if period > len(series):
+        return pd.Series(np.nan, index=series.index)
+        
     return series.ewm(span=period, adjust=adjust, min_periods=period).mean()
 
 
@@ -87,8 +105,13 @@ def dema(series: pd.Series, period: int) -> pd.Series:
     Example:
         dema_20 = dema(df["close"], 20)
     """
+    if series.empty:
+        return pd.Series(dtype=float, index=series.index)
     if period < 1:
         raise ValueError(f"period must be >= 1, got {period}")
+    if period > len(series):
+        return pd.Series(np.nan, index=series.index)
+        
     ema1 = ema(series, period)
     ema2 = ema(ema1, period)
     return 2 * ema1 - ema2
@@ -114,8 +137,12 @@ def wma(series: pd.Series, period: int) -> pd.Series:
     Example:
         wma_10 = wma(df["close"], 10)
     """
+    if series.empty:
+        return pd.Series(dtype=float, index=series.index)
     if period < 1:
         raise ValueError(f"period must be >= 1, got {period}")
+    if period > len(series):
+        return pd.Series(np.nan, index=series.index)
 
     weights = np.arange(1, period + 1, dtype=float)  # [1, 2, ..., period]
 
@@ -163,6 +190,9 @@ def vwap(
     Example:
         df["vwap"] = vwap(df["high"], df["low"], df["close"], df["volume"])
     """
+    if close.empty:
+        return pd.Series(dtype=float, index=close.index)
+        
     typical_price = (high + low + close) / 3
     tp_vol = typical_price * volume
 

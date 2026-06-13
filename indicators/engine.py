@@ -21,8 +21,9 @@ from __future__ import annotations
 import logging
 from importlib import import_module
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, List
 
+import pandas as pd
 from indicators.bridge import IndicatorBridge
 
 logger = logging.getLogger(__name__)
@@ -39,15 +40,45 @@ class IndicatorSpec:
     library: str = "auto"
 
 
+def _make_hashable(val: Any) -> Any:
+    """Helper to convert unhashable objects recursively to hashable structures."""
+    if isinstance(val, (pd.Series, pd.DataFrame)):
+        return id(val)
+    if isinstance(val, dict):
+        return tuple(sorted((k, _make_hashable(v)) for k, v in val.items()))
+    if isinstance(val, (list, tuple, set)):
+        return tuple(_make_hashable(item) for item in val)
+    try:
+        hash(val)
+        return val
+    except TypeError:
+        return id(val)
+
+
 class IndicatorEngine:
     """
     Resolve and compute indicators from built-ins, bridges, or custom callables.
     """
 
-    def __init__(self, preferred_library: str = "auto") -> None:
+    def __init__(self, preferred_library: str = "auto", max_cache_size: int = 1000) -> None:
         self.preferred_library = preferred_library
         self._bridge = IndicatorBridge(preferred_library=preferred_library)
         self._custom: Dict[str, Callable[..., Any]] = {}
+        self._cache: Dict[tuple, Any] = {}
+        self._builtin_module_cache: Dict[str, Optional[Callable]] = {}
+        self.max_cache_size = max_cache_size
+        
+        # Load user-defined custom indicators from SQLite
+        try:
+            from indicators.custom import CustomIndicatorLoader
+            loader = CustomIndicatorLoader()
+            loader.load_into_engine(self)
+        except Exception as e:
+            logger.error("Failed to load custom indicators from SQLite: %s", e)
+
+    def clear_cache(self) -> None:
+        """Clear the indicator memoization cache."""
+        self._cache.clear()
 
     def register(self, name: str, func: Callable[..., Any]) -> None:
         """Register a custom indicator callable."""
@@ -70,6 +101,17 @@ class IndicatorEngine:
             return indicator.strip()
         return getattr(indicator, "__name__", fallback) or fallback
 
+    def resolve(
+        self,
+        indicator: Any,
+        *args: Any,
+        name: Optional[str] = None,
+        library: str = "auto",
+        **kwargs: Any,
+    ) -> Any:
+        """Alias for compute() to resolve and run an indicator."""
+        return self.compute(indicator, *args, name=name, library=library, **kwargs)
+
     def compute(
         self,
         indicator: Any,
@@ -86,8 +128,40 @@ class IndicatorEngine:
         bridge.  For bridge-backed indicators, the selected library is passed
         through to support ``pandas_ta`` / ``talib`` selection.
         """
+        # Create a cache key using _make_hashable helper
+        cache_key_args = tuple(_make_hashable(arg) for arg in args)
+        cache_key_kwargs = tuple(sorted((k, _make_hashable(v)) for k, v in kwargs.items()))
+        ind_key = indicator if isinstance(indicator, str) else id(indicator)
+        cache_key = (ind_key, cache_key_args, cache_key_kwargs, library)
+
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
         fn = self._resolve(indicator, library=library)
-        return fn(*args, **kwargs)
+        result = fn(*args, **kwargs)
+
+        # LRU eviction
+        if len(self._cache) >= self.max_cache_size:
+            self._cache.pop(next(iter(self._cache)))
+
+        self._cache[cache_key] = result
+        return result
+
+    def batch_compute(self, specs: List[IndicatorSpec]) -> Dict[str, Any]:
+        """Compute multiple indicators efficiently, returning a dict of results."""
+        results = {}
+        for spec in specs:
+            res = self.compute(
+                spec.indicator,
+                *spec.args,
+                name=spec.name,
+                library=spec.library,
+                **spec.kwargs
+            )
+            # Use provided name or default derived name
+            final_name = spec.name or self.default_name(spec.indicator)
+            results[final_name] = res
+        return results
 
     def spec(
         self,
@@ -105,6 +179,11 @@ class IndicatorEngine:
             name=name or self.default_name(indicator),
             library=library,
         )
+
+    def get_registry_schema(self) -> List[Dict[str, Any]]:
+        """Return the JSON schema for all registered indicators."""
+        from indicators.registry import IndicatorRegistry
+        return IndicatorRegistry.to_json_schema()
 
     def _resolve(self, indicator: Any, library: str = "auto") -> Callable[..., Any]:
         """Resolve an indicator into a callable."""
@@ -154,6 +233,9 @@ class IndicatorEngine:
 
     def _builtin_lookup(self, name: str) -> Optional[Callable[..., Any]]:
         """Look up canonical modular pure-Python indicator functions."""
+        if name in self._builtin_module_cache:
+            return self._builtin_module_cache[name]
+
         modules = []
         for module_name in (
             "indicators.moving_averages",
@@ -163,6 +245,8 @@ class IndicatorEngine:
             "indicators.statistics",
             "indicators.volume",
             "indicators.helpers",
+            "indicators.patterns",
+            "indicators.support_resistance",
         ):
             try:
                 modules.append(import_module(module_name))
@@ -172,7 +256,10 @@ class IndicatorEngine:
         for module in modules:
             func = getattr(module, name, None)
             if callable(func):
+                self._builtin_module_cache[name] = func
                 return func
+                
+        self._builtin_module_cache[name] = None
         return None
 
 

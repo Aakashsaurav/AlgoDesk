@@ -47,10 +47,12 @@ USAGE IN A STRATEGY:
 
 import importlib
 import logging
+import threading
 from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 import pandas as pd
+from indicators.registry import register_indicator
 
 logger = logging.getLogger(__name__)
 
@@ -74,16 +76,18 @@ class LibraryStatus:
     This is evaluated once at startup — no repeated import overhead.
     """
     _cache: Dict[str, bool] = {}
+    _lock = threading.RLock()
 
     @classmethod
     def check(cls, name: str) -> bool:
-        if name not in cls._cache:
-            cls._cache[name] = _is_available(name)
-            if cls._cache[name]:
-                logger.debug(f"Library available: {name}")
-            else:
-                logger.debug(f"Library NOT available: {name} (will use fallback)")
-        return cls._cache[name]
+        with cls._lock:
+            if name not in cls._cache:
+                cls._cache[name] = _is_available(name)
+                if cls._cache[name]:
+                    logger.debug(f"Library available: {name}")
+                else:
+                    logger.debug(f"Library NOT available: {name} (will use fallback)")
+            return cls._cache[name]
 
     @classmethod
     def summary(cls) -> str:
@@ -111,6 +115,7 @@ class IndicatorBridge:
       - Direct access to pandas_ta / talib by indicator name
       - Custom indicator registration
     """
+    __slots__ = ["preferred", "_custom"]
 
     def __init__(self, preferred_library: str = "auto"):
         """
@@ -269,6 +274,10 @@ class IndicatorBridge:
     # Common indicators with library fallback chain
     # -------------------------------------------------------------------------
 
+    @register_indicator(
+        name="rsi", category="momentum", inputs=["close"], outputs=["rsi"],
+        parameters={"period": 14}
+    )
     def rsi(self, close: pd.Series, period: int = 14,
             library: str = "auto") -> pd.Series:
         """
@@ -292,6 +301,10 @@ class IndicatorBridge:
         from indicators.oscillators import rsi as _rsi
         return _rsi(close, period)
 
+    @register_indicator(
+        name="ema", category="trend", inputs=["close"], outputs=["ema"],
+        parameters={"period": 14}
+    )
     def ema(self, close: pd.Series, period: int,
             library: str = "auto") -> pd.Series:
         """EMA — Exponential Moving Average."""
@@ -309,6 +322,10 @@ class IndicatorBridge:
         from indicators.moving_averages import ema as _ema
         return _ema(close, period)
 
+    @register_indicator(
+        name="sma", category="trend", inputs=["close"], outputs=["sma"],
+        parameters={"period": 14}
+    )
     def sma(self, close: pd.Series, period: int,
             library: str = "auto") -> pd.Series:
         """SMA — Simple Moving Average."""
@@ -326,6 +343,10 @@ class IndicatorBridge:
         from indicators.moving_averages import sma as _sma
         return _sma(close, period)
 
+    @register_indicator(
+        name="atr", category="volatility", inputs=["high", "low", "close"], outputs=["atr"],
+        parameters={"period": 14}
+    )
     def atr(self, df: pd.DataFrame, period: int = 14,
             library: str = "auto") -> pd.Series:
         """ATR — Average True Range."""
@@ -333,7 +354,7 @@ class IndicatorBridge:
 
         if lib == "pandas_ta" and LibraryStatus.check("pandas_ta"):
             import pandas_ta as pta
-            return pta.atr(df["high"], df["low"], df["close"], length=period)
+            return pta.atr(df["high"], df["low"], df["close"], length=period).rename("atr")
 
         if lib == "talib" and LibraryStatus.check("talib"):
             import talib
@@ -348,6 +369,10 @@ class IndicatorBridge:
         from indicators.volatility import atr as _atr
         return _atr(df["high"], df["low"], df["close"], period)
 
+    @register_indicator(
+        name="macd", category="momentum", inputs=["close"], outputs=["macd", "histogram", "signal"],
+        parameters={"fast": 12, "slow": 26, "signal": 9}
+    )
     def macd(self, close: pd.Series, fast: int = 12, slow: int = 26,
              signal: int = 9, library: str = "auto") -> pd.DataFrame:
         """MACD — Returns DataFrame with macd, signal, histogram columns."""
@@ -368,12 +393,16 @@ class IndicatorBridge:
                 fastperiod=fast, slowperiod=slow, signalperiod=signal
             )
             return pd.DataFrame({
-                "macd":      m, "signal": s, "histogram": h
+                "macd": m, "histogram": h, "signal": s
             }, index=close.index)
 
         from indicators.oscillators import macd as _macd
         return _macd(close, fast, slow, signal)
 
+    @register_indicator(
+        name="bollinger_bands", category="volatility", inputs=["close"], outputs=["bb_lower", "bb_middle", "bb_upper", "bb_bandwidth", "bb_pct_b"],
+        parameters={"period": 20, "std_dev": 2.0}
+    )
     def bollinger_bands(self, close: pd.Series, period: int = 20,
                         std_dev: float = 2.0,
                         library: str = "auto") -> pd.DataFrame:
@@ -405,6 +434,10 @@ class IndicatorBridge:
         from indicators.volatility import bollinger_bands as _bb
         return _bb(close, period, std_dev)
 
+    @register_indicator(
+        name="supertrend", category="trend", inputs=["high", "low", "close"], outputs=["supertrend", "direction", "buy_signal", "sell_signal"],
+        parameters={"period": 10, "multiplier": 3.0}
+    )
     def supertrend(self, df: pd.DataFrame, period: int = 10,
                    multiplier: float = 3.0,
                    library: str = "auto") -> pd.DataFrame:
@@ -412,6 +445,10 @@ class IndicatorBridge:
         from indicators.trend import supertrend as _st
         return _st(df["high"], df["low"], df["close"], period, multiplier)
 
+    @register_indicator(
+        name="vwap", category="volume", inputs=["high", "low", "close", "volume"], outputs=["vwap"],
+        parameters={}
+    )
     def vwap(self, df: pd.DataFrame, library: str = "auto") -> pd.Series:
         """VWAP — Volume Weighted Average Price (daily reset)."""
         if library == "pandas_ta" and LibraryStatus.check("pandas_ta"):
@@ -421,6 +458,10 @@ class IndicatorBridge:
         from indicators.volume import vwap as _vwap
         return _vwap(df["high"], df["low"], df["close"], df["volume"])
 
+    @register_indicator(
+        name="stochastic", category="momentum", inputs=["high", "low", "close"], outputs=["stoch_k", "stoch_d"],
+        parameters={"k_period": 14, "d_period": 3}
+    )
     def stochastic(self, df: pd.DataFrame, k_period: int = 14,
                    d_period: int = 3, library: str = "auto") -> pd.DataFrame:
         """Stochastic Oscillator — %K and %D."""
@@ -439,10 +480,50 @@ class IndicatorBridge:
         from indicators.oscillators import stochastic as _stoch
         return _stoch(df["high"], df["low"], df["close"], k_period, d_period)
 
+    @register_indicator(
+        name="zscore", category="statistics", inputs=["close"], outputs=["zscore"],
+        parameters={"period": 20}
+    )
     def zscore(self, series: pd.Series, period: int = 20) -> pd.Series:
         """Rolling Z-Score — always uses built-in."""
         from indicators.statistics import zscore as _z
         return _z(series, period)
+
+    @register_indicator(
+        name="dema", category="trend", inputs=["close"], outputs=["dema"],
+        parameters={"period": 14}
+    )
+    def dema(self, close: pd.Series, period: int) -> pd.Series:
+        """DEMA — Double Exponential Moving Average."""
+        from indicators.moving_averages import dema as _dema
+        return _dema(close, period)
+
+    @register_indicator(
+        name="wma", category="trend", inputs=["close"], outputs=["wma"],
+        parameters={"period": 14}
+    )
+    def wma(self, close: pd.Series, period: int) -> pd.Series:
+        """WMA — Weighted Moving Average."""
+        from indicators.moving_averages import wma as _wma
+        return _wma(close, period)
+
+    @register_indicator(
+        name="cci", category="momentum", inputs=["high", "low", "close"], outputs=["cci"],
+        parameters={"period": 20}
+    )
+    def cci(self, high: pd.Series, low: pd.Series, close: pd.Series, period: int = 20) -> pd.Series:
+        """CCI — Commodity Channel Index."""
+        from indicators.oscillators import cci as _cci
+        return _cci(high, low, close, period)
+
+    @register_indicator(
+        name="roc", category="momentum", inputs=["close"], outputs=["roc"],
+        parameters={"period": 12}
+    )
+    def roc(self, close: pd.Series, period: int = 12) -> pd.Series:
+        """ROC — Rate of Change."""
+        from indicators.oscillators import roc as _roc
+        return _roc(close, period)
 
     # -------------------------------------------------------------------------
     # Status helpers

@@ -3,14 +3,22 @@ indicators/trend.py
 --------------------
 Trend-following indicators.
 
+Note on Caching: These functions do not use @functools.lru_cache directly.
+Memoization/caching is handled exclusively by the IndicatorEngine to
+prevent memory leaks on large live-streaming datasets.
+
 INDICATORS:
     supertrend(high, low, close, period, multiplier)   Supertrend
     adx(high, low, close, period)                      Average Directional Index
 """
 
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 from indicators.volatility import atr
+
+__all__ = ["supertrend", "adx"]
 
 
 def supertrend(
@@ -60,10 +68,21 @@ def supertrend(
         buy_entry  = st["buy_signal"]
         sell_entry = st["sell_signal"]
     """
+    if close.empty:
+        return pd.DataFrame(columns=["supertrend", "direction", "buy_signal", "sell_signal"], index=close.index, dtype=float)
+
     if period < 1:
         raise ValueError(f"period must be >= 1, got {period}")
     if multiplier <= 0:
         raise ValueError(f"multiplier must be > 0, got {multiplier}")
+
+    if len(close) < period:
+        # Return dataframe of NaNs since we can't compute ATR
+        df = pd.DataFrame(np.nan, index=close.index, columns=["supertrend", "direction", "buy_signal", "sell_signal"])
+        df["direction"] = 0
+        df["buy_signal"] = False
+        df["sell_signal"] = False
+        return df
 
     atr_val  = atr(high, low, close, period)
     hl_mid   = (high + low) / 2
@@ -163,6 +182,9 @@ def adx(
         adx_df = adx(df["high"], df["low"], df["close"])
         strong_uptrend = (adx_df["adx"] > 25) & (adx_df["plus_di"] > adx_df["minus_di"])
     """
+    if close.empty:
+        return pd.DataFrame(columns=["adx", "plus_di", "minus_di"], index=close.index, dtype=float)
+
     if period < 1:
         raise ValueError(f"period must be >= 1, got {period}")
 

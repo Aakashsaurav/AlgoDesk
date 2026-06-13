@@ -3,16 +3,24 @@ indicators/volatility.py
 --------------------------
 Volatility-based indicators.
 
+Note on Caching: These functions do not use @functools.lru_cache directly.
+Memoization/caching is handled exclusively by the IndicatorEngine to
+prevent memory leaks on large live-streaming datasets.
+
 INDICATORS:
     atr(high, low, close, period)         Average True Range
-    bollinger_bands(series, period, std)  Bollinger Bands (upper, mid, lower, %B, bandwidth)
+    bollinger_bands(series, period, std_dev) Bollinger Bands (upper, mid, lower, %B, bandwidth)
     keltner_channels(high,low,close,...)  Keltner Channels
     bb_squeeze(df, ...)                   Bollinger Band / Keltner squeeze detector
 """
 
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 from indicators.moving_averages import ema, sma
+
+__all__ = ["atr", "bollinger_bands", "keltner_channels", "bb_squeeze"]
 
 
 def atr(
@@ -53,6 +61,8 @@ def atr(
         atr_14 = atr(df["high"], df["low"], df["close"], 14)
         stop_loss = entry_price - 2 * atr_14.iloc[-1]
     """
+    if close.empty:
+        return pd.Series(dtype=float, index=close.index)
     if period < 1:
         raise ValueError(f"period must be >= 1, got {period}")
 
@@ -70,14 +80,14 @@ def atr(
 def bollinger_bands(
     series: pd.Series,
     period: int   = 20,
-    num_std: float = 2.0,
+    std_dev: float = 2.0,
 ) -> pd.DataFrame:
     """
     Bollinger Bands.
 
     Middle Band = SMA(period)
-    Upper Band  = Middle Band + num_std × rolling std deviation
-    Lower Band  = Middle Band - num_std × rolling std deviation
+    Upper Band  = Middle Band + std_dev × rolling std deviation
+    Lower Band  = Middle Band - std_dev × rolling std deviation
     %B          = (Price - Lower) / (Upper - Lower)   [0=lower, 1=upper, 0.5=middle]
     Bandwidth   = (Upper - Lower) / Middle             [squeeze when very low]
 
@@ -88,7 +98,7 @@ def bollinger_bands(
     Args:
         series  : Price series (typically close).
         period  : SMA period. Default 20.
-        num_std : Number of standard deviations. Default 2.0.
+        std_dev : Number of standard deviations (historically num_std). Default 2.0.
 
     Returns:
         pd.DataFrame with columns:
@@ -104,16 +114,19 @@ def bollinger_bands(
         buy  = df["close"] < bb["bb_lower"]    # price touches lower band
         sell = df["close"] > bb["bb_upper"]    # price touches upper band
     """
+    if series.empty:
+        return pd.DataFrame(columns=["bb_upper", "bb_middle", "bb_lower", "bb_pct_b", "bb_bandwidth"], index=series.index, dtype=float)
+
     if period < 2:
         raise ValueError(f"period must be >= 2 for std deviation, got {period}")
-    if num_std <= 0:
-        raise ValueError(f"num_std must be > 0, got {num_std}")
+    if std_dev <= 0:
+        raise ValueError(f"std_dev must be > 0, got {std_dev}")
 
     middle = series.rolling(window=period, min_periods=period).mean()
     std    = series.rolling(window=period, min_periods=period).std(ddof=1)
 
-    upper = middle + num_std * std
-    lower = middle - num_std * std
+    upper = middle + std_dev * std
+    lower = middle - std_dev * std
 
     band_width = upper - lower
     pct_b     = (series - lower) / band_width.replace(0, np.nan)
@@ -161,6 +174,9 @@ def keltner_channels(
     Example:
         kc = keltner_channels(df["high"], df["low"], df["close"])
     """
+    if close.empty:
+        return pd.DataFrame(columns=["kc_upper", "kc_middle", "kc_lower"], index=close.index, dtype=float)
+
     middle = ema(close, ema_period)
     atr_val = atr(high, low, close, atr_period)
 
@@ -211,6 +227,9 @@ def bb_squeeze(
         squeeze = bb_squeeze(df["high"], df["low"], df["close"])
         squeeze_released = squeeze.shift(1) & ~squeeze   # squeeze just ended
     """
+    if close.empty:
+        return pd.Series(dtype=bool, index=close.index)
+
     bb = bollinger_bands(close, bb_period, bb_std)
     kc = keltner_channels(high, low, close, kc_ema, kc_atr, kc_mult)
 

@@ -3,6 +3,10 @@ indicators/statistics.py
 --------------------------
 Statistical indicators for mean reversion and pairs trading strategies.
 
+Note on Caching: These functions do not use @functools.lru_cache directly.
+Memoization/caching is handled exclusively by the IndicatorEngine to
+prevent memory leaks on large live-streaming datasets.
+
 INDICATORS:
     zscore(series, period)                  Rolling Z-score
     rolling_correlation(s1, s2, period)     Rolling Pearson correlation
@@ -12,8 +16,12 @@ INDICATORS:
     cointegration_test(s1, s2)             Engle-Granger cointegration test
 """
 
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
+
+__all__ = ["zscore", "rolling_correlation", "rolling_beta", "spread", "half_life", "cointegration_test"]
 
 
 def zscore(series: pd.Series, period: int) -> pd.Series:
