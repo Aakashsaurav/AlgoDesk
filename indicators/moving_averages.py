@@ -21,10 +21,23 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from indicators.registry import register_indicator
 
 __all__ = ["sma", "ema", "dema", "wma", "vwap"]
 
 
+@register_indicator(
+    name="sma",
+    category="TREND",
+    inputs=["close"],
+    outputs=["sma"],
+    parameters={"period": 20},
+    display_name="Simple Moving Average",
+    output_type="series",
+    libraries=["built_in", "talib", "pandas_ta"],
+    description="Simple Moving Average",
+    example="sma(close, 20)"
+)
 def sma(series: pd.Series, period: int) -> pd.Series:
     """
     Simple Moving Average.
@@ -52,6 +65,18 @@ def sma(series: pd.Series, period: int) -> pd.Series:
     return series.rolling(window=period, min_periods=period).mean()
 
 
+@register_indicator(
+    name="ema",
+    category="TREND",
+    inputs=["close"],
+    outputs=["ema"],
+    parameters={"period": 20},
+    display_name="Exponential Moving Average",
+    output_type="series",
+    libraries=["built_in", "talib", "pandas_ta"],
+    description="Exponential Moving Average",
+    example="ema(close, 20)"
+)
 def ema(series: pd.Series, period: int, adjust: bool = False) -> pd.Series:
     """
     Exponential Moving Average.
@@ -84,6 +109,18 @@ def ema(series: pd.Series, period: int, adjust: bool = False) -> pd.Series:
     return series.ewm(span=period, adjust=adjust, min_periods=period).mean()
 
 
+@register_indicator(
+    name="dema",
+    category="TREND",
+    inputs=["close"],
+    outputs=["dema"],
+    parameters={"period": 20},
+    display_name="Double Exponential Moving Average",
+    output_type="series",
+    libraries=["built_in", "talib"],
+    description="Double Exponential Moving Average",
+    example="dema(close, 20)"
+)
 def dema(series: pd.Series, period: int) -> pd.Series:
     """
     Double Exponential Moving Average.
@@ -117,6 +154,18 @@ def dema(series: pd.Series, period: int) -> pd.Series:
     return 2 * ema1 - ema2
 
 
+@register_indicator(
+    name="wma",
+    category="TREND",
+    inputs=["close"],
+    outputs=["wma"],
+    parameters={"period": 20},
+    display_name="Weighted Moving Average",
+    output_type="series",
+    libraries=["built_in", "talib"],
+    description="Weighted Moving Average",
+    example="wma(close, 20)"
+)
 def wma(series: pd.Series, period: int) -> pd.Series:
     """
     Weighted Moving Average.

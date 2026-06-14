@@ -21,10 +21,23 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from indicators.moving_averages import ema, sma
+from indicators.registry import register_indicator
 
 __all__ = ["rsi", "stochastic", "macd", "roc", "cci"]
 
 
+@register_indicator(
+    name="rsi",
+    category="MOMENTUM",
+    inputs=["close"],
+    outputs=["rsi"],
+    parameters={"period": 14},
+    display_name="Relative Strength Index",
+    output_type="series",
+    libraries=["built_in", "talib", "pandas_ta"],
+    description="Relative Strength Index",
+    example="rsi(close, 14)"
+)
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     """
     Relative Strength Index (Wilder's RSI).
@@ -80,6 +93,18 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     return rsi_val
 
 
+@register_indicator(
+    name="stochastic",
+    category="MOMENTUM",
+    inputs=["high", "low", "close"],
+    outputs=["stoch_k", "stoch_d"],
+    parameters={"k_period": 14, "d_period": 3, "smooth_k": 3},
+    display_name="Stochastic Oscillator",
+    output_type="dataframe",
+    libraries=["built_in", "talib", "pandas_ta"],
+    description="Stochastic Oscillator",
+    example="stochastic(high, low, close, 14, 3, 3)"
+)
 def stochastic(
     high:   pd.Series,
     low:    pd.Series,
@@ -135,6 +160,18 @@ def stochastic(
     return pd.DataFrame({"stoch_k": k, "stoch_d": d}, index=close.index)
 
 
+@register_indicator(
+    name="macd",
+    category="MOMENTUM",
+    inputs=["close"],
+    outputs=["macd", "signal", "histogram"],
+    parameters={"fast_period": 12, "slow_period": 26, "signal_period": 9},
+    display_name="Moving Average Convergence Divergence",
+    output_type="dataframe",
+    libraries=["built_in", "talib", "pandas_ta"],
+    description="Moving Average Convergence Divergence",
+    example="macd(close, 12, 26, 9)"
+)
 def macd(
     series:        pd.Series,
     fast_period:   int = 12,
@@ -192,6 +229,18 @@ def macd(
     }, index=series.index)
 
 
+@register_indicator(
+    name="roc",
+    category="MOMENTUM",
+    inputs=["close"],
+    outputs=["roc"],
+    parameters={"period": 12},
+    display_name="Rate of Change",
+    output_type="series",
+    libraries=["built_in", "talib", "pandas_ta"],
+    description="Rate of Change",
+    example="roc(close, 12)"
+)
 def roc(series: pd.Series, period: int = 12) -> pd.Series:
     """
     Rate of Change — momentum as percentage.
@@ -218,6 +267,18 @@ def roc(series: pd.Series, period: int = 12) -> pd.Series:
     return series.pct_change(periods=period) * 100
 
 
+@register_indicator(
+    name="cci",
+    category="MOMENTUM",
+    inputs=["high", "low", "close"],
+    outputs=["cci"],
+    parameters={"period": 20},
+    display_name="Commodity Channel Index",
+    output_type="series",
+    libraries=["built_in", "talib", "pandas_ta"],
+    description="Commodity Channel Index",
+    example="cci(high, low, close, 20)"
+)
 def cci(
     high:   pd.Series,
     low:    pd.Series,

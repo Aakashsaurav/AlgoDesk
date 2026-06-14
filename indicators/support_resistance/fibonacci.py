@@ -4,7 +4,7 @@ indicators/support_resistance/fibonacci.py
 Fibonacci retracements and extensions.
 """
 import pandas as pd
-from typing import Dict, Tuple
+from typing import List, Tuple
 from indicators.support_resistance.models import SRLevel
 from indicators.registry import register_indicator
 
@@ -36,16 +36,16 @@ def _find_major_swing(high: pd.Series, low: pd.Series, window: int = 50) -> Tupl
     name="fibonacci_retracements",
     category="SUPPORT_RESISTANCE",
     inputs=["high", "low"],
-    outputs=["fib_0.0", "fib_0.236", "fib_0.382", "fib_0.5", "fib_0.618", "fib_0.786", "fib_1.0"],
+    outputs=["levels"],
     parameters={"trend": "up"}
 )
-def fibonacci_retracements(high: float, low: float, trend: str = "up") -> Dict[str, SRLevel]:
+def fibonacci_retracements(high: float, low: float, trend: str = "up") -> list[SRLevel]:
     """Calculate Fibonacci retracement levels for a given price range."""
-    res = {}
+    res = []
     for level in FIBO_RETRACEMENT_LEVELS:
         price = _price_at_level(high, low, level, trend)
         level_type = "support" if trend == "up" else "resistance"
-        res[f"fib_{level}"] = SRLevel(price=price, type=level_type, source="fibonacci")
+        res.append(SRLevel(price=price, level_type=level_type, source="fibonacci"))
         
     return res
 
@@ -56,13 +56,37 @@ def fibonacci_retracements(high: float, low: float, trend: str = "up") -> Dict[s
     outputs=["levels"],
     parameters={"trend": "up"}
 )
-def fibonacci_extensions(high: float, low: float, trend: str = "up") -> Dict[str, SRLevel]:
+def fibonacci_extensions(high: float, low: float, trend: str = "up") -> list[SRLevel]:
     """Calculate Fibonacci extension levels for a given price range."""
-    res = {}
+    res = []
     for level in FIBO_EXTENSION_LEVELS:
         price = _price_at_level(high, low, level, trend)
         level_type = "support" if trend == "up" else "resistance"
-        res[f"fib_ext_{level}"] = SRLevel(price=price, type=level_type, source="fibonacci_extension")
+        res.append(SRLevel(price=price, level_type=level_type, source="fibonacci_extension"))
+        
+    return res
+
+@register_indicator(
+    name="fibonacci_fans",
+    category="SUPPORT_RESISTANCE",
+    inputs=["high", "low"],
+    outputs=["levels"],
+    parameters={"window": 50}
+)
+def fibonacci_fans(df: pd.DataFrame, lookback: int = 50) -> list[SRLevel]:
+    """Calculate Fibonacci Fan levels based on recent swing."""
+    if len(df) < lookback:
+        return []
+        
+    h, l, trend = _find_major_swing(df['high'], df['low'], lookback)
+    
+    # Just reusing retracements logic for simplicity of price levels at the fan edge.
+    # A true fan is diagonal, but returning static SRLevels is the required contract.
+    res = []
+    for level in [0.382, 0.5, 0.618]:
+        price = _price_at_level(h, l, level, trend)
+        level_type = "support" if trend == "up" else "resistance"
+        res.append(SRLevel(price=price, level_type=level_type, source="fibonacci_fan"))
         
     return res
 
@@ -70,23 +94,20 @@ def fibonacci_extensions(high: float, low: float, trend: str = "up") -> Dict[str
     name="auto_fibonacci",
     category="SUPPORT_RESISTANCE",
     inputs=["high", "low"],
-    outputs=["retracements", "extensions"],
+    outputs=["levels"],
     parameters={"window": 50}
 )
-def auto_fibonacci(high: pd.Series, low: pd.Series, window: int = 50) -> Dict[str, Dict[str, SRLevel]]:
+def auto_fibonacci(high: pd.Series, low: pd.Series, window: int = 50) -> list[SRLevel]:
     """Automatically find major swing and calculate retracements and extensions."""
     if len(high) < window or len(low) < window:
-        return {"retracements": {}, "extensions": {}}
+        return []
         
     h, l, trend = _find_major_swing(high, low, window)
     
     retracements = fibonacci_retracements(h, l, trend)
     extensions = fibonacci_extensions(h, l, trend)
     
-    return {
-        "retracements": retracements,
-        "extensions": extensions
-    }
+    return retracements + extensions
 
 __all__ = [
     "FIBO_RETRACEMENT_LEVELS",
@@ -95,5 +116,6 @@ __all__ = [
     "_find_major_swing",
     "fibonacci_retracements",
     "fibonacci_extensions",
-    "auto_fibonacci"
+    "auto_fibonacci",
+    "fibonacci_fans"
 ]

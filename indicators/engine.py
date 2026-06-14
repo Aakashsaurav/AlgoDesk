@@ -246,6 +246,8 @@ class IndicatorEngine:
             "indicators.volume",
             "indicators.helpers",
             "indicators.patterns",
+            "indicators.patterns.candlestick",
+            "indicators.patterns.dow_patterns",
             "indicators.support_resistance",
         ):
             try:

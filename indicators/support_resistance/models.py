@@ -4,21 +4,26 @@ indicators/support_resistance/models.py
 Data models for Support and Resistance levels and zones.
 """
 from dataclasses import dataclass
+import pandas as pd
 
 @dataclass
 class SRLevel:
     """A distinct price level acting as support or resistance."""
     price: float
     strength: float = 1.0  # 0.0 to 1.0
-    type: str = "unknown"  # "support", "resistance", "pivot"
+    level_type: str = "unknown"  # "support", "resistance", "pivot"
     source: str = "unknown" # e.g., "pivot", "swing", "fibonacci"
+    touches: int = 0
+    last_tested: pd.Timestamp | None = None
 
     def to_dict(self):
         return {
             "price": self.price,
             "strength": self.strength,
-            "type": self.type,
-            "source": self.source
+            "level_type": self.level_type,
+            "source": self.source,
+            "touches": self.touches,
+            "last_tested": self.last_tested
         }
 
 @dataclass
@@ -27,7 +32,7 @@ class SRZone:
     lower_price: float
     upper_price: float
     strength: float = 1.0
-    type: str = "zone"
+    level_type: str = "zone"
     source: str = "unknown"
 
     def to_dict(self):
@@ -35,7 +40,7 @@ class SRZone:
             "lower_price": self.lower_price,
             "upper_price": self.upper_price,
             "strength": self.strength,
-            "type": self.type,
+            "level_type": self.level_type,
             "source": self.source
         }
 

@@ -20,10 +20,23 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from indicators.registry import register_indicator
 
 __all__ = ["zscore", "rolling_correlation", "rolling_beta", "spread", "half_life", "cointegration_test"]
 
 
+@register_indicator(
+    name="zscore",
+    category="STATISTICS",
+    inputs=["close"],
+    outputs=["zscore"],
+    parameters={"period": 20},
+    display_name="Rolling Z-Score",
+    output_type="series",
+    libraries=["built_in"],
+    description="Rolling Z-Score",
+    example="zscore(close, 20)"
+)
 def zscore(series: pd.Series, period: int) -> pd.Series:
     """
     Rolling Z-score.
@@ -63,6 +76,18 @@ def zscore(series: pd.Series, period: int) -> pd.Series:
     return (series - roll_mean) / roll_std.replace(0, np.nan)
 
 
+@register_indicator(
+    name="rolling_correlation",
+    category="STATISTICS",
+    inputs=["s1", "s2"],
+    outputs=["correlation"],
+    parameters={"period": 20},
+    display_name="Rolling Correlation",
+    output_type="series",
+    libraries=["built_in"],
+    description="Rolling Correlation",
+    example="rolling_correlation(s1, s2, 20)"
+)
 def rolling_correlation(
     s1:     pd.Series,
     s2:     pd.Series,
@@ -95,6 +120,18 @@ def rolling_correlation(
     return s1.rolling(window=period, min_periods=period).corr(s2)
 
 
+@register_indicator(
+    name="rolling_beta",
+    category="STATISTICS",
+    inputs=["s1", "s2"],
+    outputs=["beta"],
+    parameters={"period": 20},
+    display_name="Rolling Beta",
+    output_type="series",
+    libraries=["built_in"],
+    description="Rolling Beta",
+    example="rolling_beta(s1, s2, 20)"
+)
 def rolling_beta(
     s1:     pd.Series,
     s2:     pd.Series,
@@ -129,6 +166,18 @@ def rolling_beta(
     return cov / var.replace(0, np.nan)
 
 
+@register_indicator(
+    name="spread",
+    category="STATISTICS",
+    inputs=["s1", "s2"],
+    outputs=["spread"],
+    parameters={"hedge_ratio": 1.0},
+    display_name="Spread",
+    output_type="series",
+    libraries=["built_in"],
+    description="Spread",
+    example="spread(s1, s2, 1.0)"
+)
 def spread(
     s1:          pd.Series,
     s2:          pd.Series,
@@ -160,6 +209,18 @@ def spread(
     return s1 - hedge_ratio * s2
 
 
+@register_indicator(
+    name="half_life",
+    category="STATISTICS",
+    inputs=["close"],
+    outputs=["half_life"],
+    parameters={},
+    display_name="Half Life",
+    output_type="scalar",
+    libraries=["built_in"],
+    description="Half Life",
+    example="half_life(close)"
+)
 def half_life(spread_series: pd.Series) -> float:
     """
     Estimate the mean reversion half-life using the Ornstein-Uhlenbeck model.
@@ -221,6 +282,18 @@ def half_life(spread_series: pd.Series) -> float:
     return float(-np.log(2) / lam)
 
 
+@register_indicator(
+    name="cointegration_test",
+    category="STATISTICS",
+    inputs=["s1", "s2"],
+    outputs=["is_cointegrated", "p_value", "hedge_ratio", "adf_statistic"],
+    parameters={"significance": 0.05},
+    display_name="Cointegration Test",
+    output_type="dict",
+    libraries=["built_in"],
+    description="Cointegration Test",
+    example="cointegration_test(s1, s2, 0.05)"
+)
 def cointegration_test(
     s1: pd.Series,
     s2: pd.Series,

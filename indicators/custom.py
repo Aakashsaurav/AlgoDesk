@@ -40,7 +40,7 @@ class CustomIndicatorLoader:
     """
 
     def __init__(self, db_path: Optional[Path] = None):
-        self.db_path = db_path or config.DATA_DIR / "custom_indicators.db"
+        self.db_path = db_path or config.CUSTOM_INDICATOR
         self._init_db()
 
     def _init_db(self) -> None:
@@ -62,7 +62,12 @@ class CustomIndicatorLoader:
             conn.commit()
 
     def save(self, spec: CustomIndicatorSpec) -> None:
-        """Save or update a custom indicator in the database."""
+        """
+        Save or update a custom indicator in the database.
+        
+        Raises:
+            sqlite3.Error: If database operation fails.
+        """
         with sqlite3.connect(self.db_path) as conn:
             conn.execute('''
                 INSERT OR REPLACE INTO custom_indicators 
@@ -82,14 +87,24 @@ class CustomIndicatorLoader:
         logger.info("Saved custom indicator '%s' to %s", spec.name, self.db_path)
 
     def delete(self, name: str) -> None:
-        """Delete a custom indicator from the database."""
+        """
+        Delete a custom indicator from the database.
+        
+        Raises:
+            sqlite3.Error: If database operation fails.
+        """
         with sqlite3.connect(self.db_path) as conn:
             conn.execute('DELETE FROM custom_indicators WHERE name = ?', (name,))
             conn.commit()
         logger.info("Deleted custom indicator '%s'", name)
 
     def list_all(self) -> List[CustomIndicatorSpec]:
-        """List all custom indicators stored in the database."""
+        """
+        List all custom indicators stored in the database.
+        
+        Raises:
+            sqlite3.Error: If database operation fails.
+        """
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute('SELECT * FROM custom_indicators')
             rows = cursor.fetchall()
@@ -109,7 +124,12 @@ class CustomIndicatorLoader:
         return specs
 
     def load_into_engine(self, engine: IndicatorEngine) -> None:
-        """Load all custom indicators from the database into the given engine."""
+        """
+        Load all custom indicators from the database into the given engine.
+        
+        Raises:
+            sqlite3.Error: If database operation fails when loading indicators.
+        """
         specs = self.list_all()
         for spec in specs:
             if spec.type == 'expression':
@@ -145,7 +165,18 @@ class CustomIndicatorLoader:
             data.update(params)
 
             parser = ExpressionParser(engine, data)
-            return parser.evaluate(spec.code)
+            result = parser.evaluate(spec.code)
+            
+            if not isinstance(result, pd.Series):
+                raise TypeError(f"Custom expression indicator '{spec.name}' must return a pandas Series, got {type(result).__name__}.")
+            
+            for val in data.values():
+                if isinstance(val, pd.Series):
+                    if not result.index.equals(val.index):
+                        raise ValueError(f"Custom expression indicator '{spec.name}' returned Series with mismatched index.")
+                    break
+                    
+            return result
             
         wrapper.__name__ = spec.name
         wrapper.__doc__ = spec.description
@@ -162,8 +193,7 @@ class CustomIndicatorLoader:
             "__builtins__": {
                 "abs": abs, "min": min, "max": max, "sum": sum, 
                 "round": round, "len": len, "range": range,
-                "bool": bool, "int": int, "float": float, "str": str,
-                "Exception": Exception, "ValueError": ValueError
+                "bool": bool, "int": int, "float": float, "str": str
             }
         }
         
@@ -177,7 +207,29 @@ class CustomIndicatorLoader:
                 logger.error("Python indicator '%s' must define a function named '%s'", spec.name, spec.name)
                 return
                 
-            engine.register(spec.name, func)
+            def wrapper(*args: Any, **kwargs: Any) -> Any:
+                result = func(*args, **kwargs)
+                
+                if not isinstance(result, pd.Series):
+                    raise TypeError(f"Custom python indicator '{spec.name}' must return a pandas Series, got {type(result).__name__}.")
+                
+                ref_index = None
+                for arg in args:
+                    if isinstance(arg, pd.Series) or isinstance(arg, pd.DataFrame):
+                        ref_index = arg.index
+                        break
+                if ref_index is None:
+                    for v in kwargs.values():
+                        if isinstance(v, pd.Series) or isinstance(v, pd.DataFrame):
+                            ref_index = v.index
+                            break
+                            
+                if ref_index is not None and not result.index.equals(ref_index):
+                    raise ValueError(f"Custom python indicator '{spec.name}' returned Series with mismatched index.")
+                    
+                return result
+                
+            engine.register(spec.name, wrapper)
         except Exception as e:
             logger.error("Failed to load python indicator '%s': %s", spec.name, e)
 

@@ -12,8 +12,21 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from indicators.registry import register_indicator
 
 
+@register_indicator(
+    name="vwap",
+    category="VOLUME",
+    inputs=["high", "low", "close", "volume"],
+    outputs=["vwap"],
+    parameters={},
+    display_name="Volume Weighted Average Price",
+    output_type="series",
+    libraries=["built_in", "pandas_ta"],
+    description="Volume Weighted Average Price",
+    example="vwap(high, low, close, volume)"
+)
 def vwap(
     high: pd.Series,
     low: pd.Series,
@@ -48,6 +61,18 @@ def vwap(
     return result
 
 
+@register_indicator(
+    name="obv",
+    category="VOLUME",
+    inputs=["close", "volume"],
+    outputs=["obv"],
+    parameters={},
+    display_name="On Balance Volume",
+    output_type="series",
+    libraries=["built_in", "talib", "pandas_ta"],
+    description="On Balance Volume",
+    example="obv(close, volume)"
+)
 def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
     """On Balance Volume."""
     if close.empty:

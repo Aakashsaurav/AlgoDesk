@@ -138,6 +138,7 @@ class AppConfig:
     SQLITE_DIR:  Path = DATA_DIR / "sqlite"
     LIVE_TICK_DIR: Path = DATA_DIR / "live_ticks"
     UNIVERSE_DIR: Path = DATA_DIR / "universes"
+    CUSTOM_INDICATOR: Path = BASE_DIR / "indicators" / "custom_indicators.db"
 
     # Legacy flat paths — used by broker/upstox/data_manager.py.
     # New code should use DataManager which builds hierarchical paths:

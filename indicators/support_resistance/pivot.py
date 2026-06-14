@@ -25,37 +25,43 @@ def calculate_pivots(high: float, low: float, close: float, method: str = "class
     
     if method == "classic":
         p = (high + low + close) / 3
-        pivots["P"] = SRLevel(price=p, type="pivot", source="classic")
-        pivots["R1"] = SRLevel(price=(2 * p) - low, type="resistance", source="classic")
-        pivots["S1"] = SRLevel(price=(2 * p) - high, type="support", source="classic")
-        pivots["R2"] = SRLevel(price=p + (high - low), type="resistance", source="classic")
-        pivots["S2"] = SRLevel(price=p - (high - low), type="support", source="classic")
+        pivots["P"] = SRLevel(price=p, level_type="pivot", source="classic")
+        pivots["R1"] = SRLevel(price=(2 * p) - low, level_type="resistance", source="classic")
+        pivots["S1"] = SRLevel(price=(2 * p) - high, level_type="support", source="classic")
+        pivots["R2"] = SRLevel(price=p + (high - low), level_type="resistance", source="classic")
+        pivots["S2"] = SRLevel(price=p - (high - low), level_type="support", source="classic")
+        pivots["R3"] = SRLevel(price=p + 2 * (high - low), level_type="resistance", source="classic")
+        pivots["S3"] = SRLevel(price=p - 2 * (high - low), level_type="support", source="classic")
         
     elif method == "woodie":
         p = (high + low + 2 * close) / 4
-        pivots["P"] = SRLevel(price=p, type="pivot", source="woodie")
-        pivots["R1"] = SRLevel(price=(2 * p) - low, type="resistance", source="woodie")
-        pivots["S1"] = SRLevel(price=(2 * p) - high, type="support", source="woodie")
-        pivots["R2"] = SRLevel(price=p + high - low, type="resistance", source="woodie")
-        pivots["S2"] = SRLevel(price=p - high + low, type="support", source="woodie")
+        pivots["P"] = SRLevel(price=p, level_type="pivot", source="woodie")
+        pivots["R1"] = SRLevel(price=(2 * p) - low, level_type="resistance", source="woodie")
+        pivots["S1"] = SRLevel(price=(2 * p) - high, level_type="support", source="woodie")
+        pivots["R2"] = SRLevel(price=p + high - low, level_type="resistance", source="woodie")
+        pivots["S2"] = SRLevel(price=p - high + low, level_type="support", source="woodie")
         
     elif method == "camarilla":
         range_hl = high - low
-        pivots["R4"] = SRLevel(price=close + (range_hl * 1.1) / 2, type="resistance", source="camarilla")
-        pivots["R3"] = SRLevel(price=close + (range_hl * 1.1) / 4, type="resistance", source="camarilla")
-        pivots["S3"] = SRLevel(price=close - (range_hl * 1.1) / 4, type="support", source="camarilla")
-        pivots["S4"] = SRLevel(price=close - (range_hl * 1.1) / 2, type="support", source="camarilla")
+        pivots["R4"] = SRLevel(price=close + (range_hl * 1.1) / 2, level_type="resistance", source="camarilla")
+        pivots["R3"] = SRLevel(price=close + (range_hl * 1.1) / 4, level_type="resistance", source="camarilla")
+        pivots["R2"] = SRLevel(price=close + (range_hl * 1.1) / 6, level_type="resistance", source="camarilla")
+        pivots["R1"] = SRLevel(price=close + (range_hl * 1.1) / 12, level_type="resistance", source="camarilla")
+        pivots["S1"] = SRLevel(price=close - (range_hl * 1.1) / 12, level_type="support", source="camarilla")
+        pivots["S2"] = SRLevel(price=close - (range_hl * 1.1) / 6, level_type="support", source="camarilla")
+        pivots["S3"] = SRLevel(price=close - (range_hl * 1.1) / 4, level_type="support", source="camarilla")
+        pivots["S4"] = SRLevel(price=close - (range_hl * 1.1) / 2, level_type="support", source="camarilla")
 
     elif method == "fibonacci":
         p = (high + low + close) / 3
         range_hl = high - low
-        pivots["P"] = SRLevel(price=p, type="pivot", source="fibonacci")
-        pivots["R1"] = SRLevel(price=p + 0.382 * range_hl, type="resistance", source="fibonacci")
-        pivots["R2"] = SRLevel(price=p + 0.618 * range_hl, type="resistance", source="fibonacci")
-        pivots["R3"] = SRLevel(price=p + 1.000 * range_hl, type="resistance", source="fibonacci")
-        pivots["S1"] = SRLevel(price=p - 0.382 * range_hl, type="support", source="fibonacci")
-        pivots["S2"] = SRLevel(price=p - 0.618 * range_hl, type="support", source="fibonacci")
-        pivots["S3"] = SRLevel(price=p - 1.000 * range_hl, type="support", source="fibonacci")
+        pivots["P"] = SRLevel(price=p, level_type="pivot", source="fibonacci")
+        pivots["R1"] = SRLevel(price=p + 0.382 * range_hl, level_type="resistance", source="fibonacci")
+        pivots["R2"] = SRLevel(price=p + 0.618 * range_hl, level_type="resistance", source="fibonacci")
+        pivots["R3"] = SRLevel(price=p + 1.000 * range_hl, level_type="resistance", source="fibonacci")
+        pivots["S1"] = SRLevel(price=p - 0.382 * range_hl, level_type="support", source="fibonacci")
+        pivots["S2"] = SRLevel(price=p - 0.618 * range_hl, level_type="support", source="fibonacci")
+        pivots["S3"] = SRLevel(price=p - 1.000 * range_hl, level_type="support", source="fibonacci")
 
     return pivots
 
@@ -73,9 +79,9 @@ def demark_pivots(open_price: float, high: float, low: float, close: float) -> D
     s1 = x / 2 - high
     
     return {
-        "P": SRLevel(price=p, type="pivot", source="demark"),
-        "R1": SRLevel(price=r1, type="resistance", source="demark"),
-        "S1": SRLevel(price=s1, type="support", source="demark")
+        "P": SRLevel(price=p, level_type="pivot", source="demark"),
+        "R1": SRLevel(price=r1, level_type="resistance", source="demark"),
+        "S1": SRLevel(price=s1, level_type="support", source="demark")
     }
 
 def to_sr_levels(pivots_dict: Dict[str, SRLevel]) -> List[SRLevel]:
@@ -109,8 +115,7 @@ def monthly_pivots(df: pd.DataFrame, method: str = "classic") -> Dict[str, SRLev
     if df.empty or len(df) < 2:
         return {}
         
-    # 'ME' for month end or 'M' for backwards compatibility
-    monthly = df.resample('M').agg({
+    monthly = df.resample('ME').agg({
         'open': 'first',
         'high': 'max',
         'low': 'min',

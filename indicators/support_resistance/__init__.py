@@ -38,7 +38,7 @@ def scan_all_levels(df: pd.DataFrame, methods: List[str] = None) -> List[SRLevel
             all_levels.extend(list(pivs.values()))
             
     if "swing" in methods and not df.empty:
-        swings = calculate_swing_levels(df['high'], df['low'])
+        swings = calculate_swing_levels(df['high'], df['low'], df['close'])
         all_levels.extend(swings)
         
     if "fibonacci" in methods and not df.empty:
@@ -47,19 +47,19 @@ def scan_all_levels(df: pd.DataFrame, methods: List[str] = None) -> List[SRLevel
         last_close = df['close'].iloc[-1]
         trend = "up" if last_close > (highest + lowest) / 2 else "down"
         fibs = fibonacci_retracements(highest, lowest, trend=trend)
-        all_levels.extend(list(fibs.values()))
+        all_levels.extend(fibs)
         
-    return all_levels
+    return sort_by_strength(all_levels)
 
 def nearest_support(levels: List[Union[SRLevel, SRZone]], current_price: float) -> Optional[Union[SRLevel, SRZone]]:
     """Find the nearest support level below the current price."""
     supports = []
     for l in levels:
         if isinstance(l, SRLevel):
-            if getattr(l, "type", "unknown") in ("support", "pivot", "unknown") and l.price < current_price:
+            if getattr(l, "level_type", "unknown") in ("support", "pivot", "unknown") and l.price < current_price:
                 supports.append(l)
         elif isinstance(l, SRZone):
-            if getattr(l, "type", "unknown") in ("support", "zone", "unknown") and l.upper_price < current_price:
+            if getattr(l, "level_type", "unknown") in ("support", "zone", "unknown") and l.upper_price < current_price:
                 supports.append(l)
                 
     if not supports:
@@ -72,10 +72,10 @@ def nearest_resistance(levels: List[Union[SRLevel, SRZone]], current_price: floa
     resistances = []
     for l in levels:
         if isinstance(l, SRLevel):
-            if getattr(l, "type", "unknown") in ("resistance", "pivot", "unknown") and l.price > current_price:
+            if getattr(l, "level_type", "unknown") in ("resistance", "pivot", "unknown") and l.price > current_price:
                 resistances.append(l)
         elif isinstance(l, SRZone):
-            if getattr(l, "type", "unknown") in ("resistance", "zone", "unknown") and l.lower_price > current_price:
+            if getattr(l, "level_type", "unknown") in ("resistance", "zone", "unknown") and l.lower_price > current_price:
                 resistances.append(l)
                 
     if not resistances:

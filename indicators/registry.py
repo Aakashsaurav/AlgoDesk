@@ -11,7 +11,10 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
+import logging
 from typing import Callable, Dict, List, Any, Optional
+
+logger = logging.getLogger(__name__)
 
 class Categories(str, Enum):
     TREND = "TREND"
@@ -32,6 +35,16 @@ class IndicatorMeta:
     inputs: List[str]  # e.g., ["close"], ["high", "low", "close"]
     parameters: Dict[str, Any]  # e.g., {"period": 14, "std_dev": 2.0}
     outputs: List[str]  # e.g., ["RSI_14"], ["macd", "signal", "histogram"]
+    display_name: str = ""
+    output_type: str = "series"  # "series" | "dataframe" | "scalar" | "list"
+    libraries: List[str] = field(default_factory=list)
+    example: str = ""
+
+    def __post_init__(self):
+        if not self.display_name:
+            self.display_name = self.name.replace("_", " ").title()
+        if not self.libraries:
+            self.libraries = ["built_in"]
 
 
 class IndicatorRegistry:
@@ -56,6 +69,32 @@ class IndicatorRegistry:
         """Return a copy of all registered indicators."""
         with cls._lock:
             return cls._registry.copy()
+
+    @classmethod
+    def auto_register_core(cls) -> None:
+        """
+        Eagerly import core indicator modules to run their decorators.
+        """
+        import sys
+        import importlib
+        for module_name in [
+            "indicators.moving_averages",
+            "indicators.oscillators",
+            "indicators.volatility",
+            "indicators.trend",
+            "indicators.volume",
+            "indicators.statistics",
+            "indicators.patterns.candlestick",
+            "indicators.patterns.dow_patterns",
+        ]:
+            try:
+                if module_name in sys.modules:
+                    importlib.reload(sys.modules[module_name])
+                else:
+                    importlib.import_module(module_name)
+            except Exception as e:
+                logger.error(f"Failed to auto-register {module_name}: {e}")
+
 
     @classmethod
     def auto_register_external(cls) -> None:
@@ -116,11 +155,15 @@ class IndicatorRegistry:
             return [
                 {
                     "name": v.name,
+                    "display_name": v.display_name,
                     "category": v.category,
                     "description": v.description,
                     "inputs": v.inputs,
                     "parameters": v.parameters,
+                    "output_type": v.output_type,
                     "outputs": v.outputs,
+                    "libraries": v.libraries,
+                    "example": v.example,
                 }
                 for v in cls._registry.values()
             ]
@@ -133,18 +176,29 @@ def register_indicator(
     outputs: List[str],
     parameters: Optional[Dict[str, Any]] = None,
     description: str = "",
+    display_name: str = "",
+    output_type: str = "series",
+    libraries: Optional[List[str]] = None,
+    example: str = "",
 ) -> Callable:
     """
     Decorator to register an indicator function with the registry.
     """
     def decorator(func: Callable) -> Callable:
+        disp_name = display_name or name.replace("_", " ").title()
+        desc = description or (func.__doc__ or "").strip().split("\n")[0]
+        libs = libraries or ["built_in"]
         meta = IndicatorMeta(
             name=name,
             category=category,
-            description=description or (func.__doc__ or "").strip().split("\n")[0],
+            description=desc,
             inputs=inputs,
             parameters=parameters or {},
             outputs=outputs,
+            display_name=disp_name,
+            output_type=output_type,
+            libraries=libs,
+            example=example,
         )
         IndicatorRegistry.register(meta)
         return func
@@ -153,5 +207,6 @@ def register_indicator(
 
 __all__ = ["IndicatorMeta", "IndicatorRegistry", "register_indicator", "Categories"]
 
-# Auto-register external libraries at module load
+# Auto-register core and external libraries at module load
+IndicatorRegistry.auto_register_core()
 IndicatorRegistry.auto_register_external()

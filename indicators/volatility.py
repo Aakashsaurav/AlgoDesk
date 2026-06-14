@@ -19,10 +19,23 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from indicators.moving_averages import ema, sma
+from indicators.registry import register_indicator
 
 __all__ = ["atr", "bollinger_bands", "keltner_channels", "bb_squeeze"]
 
 
+@register_indicator(
+    name="atr",
+    category="VOLATILITY",
+    inputs=["high", "low", "close"],
+    outputs=["atr"],
+    parameters={"period": 14},
+    display_name="Average True Range",
+    output_type="series",
+    libraries=["built_in", "talib", "pandas_ta"],
+    description="Average True Range",
+    example="atr(high, low, close, 14)"
+)
 def atr(
     high:   pd.Series,
     low:    pd.Series,
@@ -77,9 +90,26 @@ def atr(
     return tr.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
 
 
+# def bollinger_bands(
+#     series: pd.Series,
+#     period: int   = 20,
+#     std_dev: float = 2.0,
+# ) -> pd.DataFrame:
+@register_indicator(
+    name="bollinger_bands",
+    category="VOLATILITY",
+    inputs=["close"],
+    outputs=["bb_lower", "bb_middle", "bb_upper", "bb_bandwidth", "bb_pct_b"],
+    parameters={"period": 20, "std_dev": 2.0},
+    display_name="Bollinger Bands",
+    output_type="dataframe",
+    libraries=["built_in", "talib", "pandas_ta"],
+    description="Bollinger Bands",
+    example="bollinger_bands(close, 20, 2.0)"
+)
 def bollinger_bands(
     series: pd.Series,
-    period: int   = 20,
+    period: int = 20,
     std_dev: float = 2.0,
 ) -> pd.DataFrame:
     """
@@ -119,6 +149,7 @@ def bollinger_bands(
 
     if period < 2:
         raise ValueError(f"period must be >= 2 for std deviation, got {period}")
+    
     if std_dev <= 0:
         raise ValueError(f"std_dev must be > 0, got {std_dev}")
 
@@ -141,6 +172,18 @@ def bollinger_bands(
     }, index=series.index)
 
 
+@register_indicator(
+    name="keltner_channels",
+    category="VOLATILITY",
+    inputs=["high", "low", "close"],
+    outputs=["kc_upper", "kc_middle", "kc_lower"],
+    parameters={"ema_period": 20, "atr_period": 10, "multiplier": 2.0},
+    display_name="Keltner Channels",
+    output_type="dataframe",
+    libraries=["built_in", "pandas_ta"],
+    description="Keltner Channels",
+    example="keltner_channels(high, low, close, 20, 10, 2.0)"
+)
 def keltner_channels(
     high:       pd.Series,
     low:        pd.Series,
@@ -190,6 +233,18 @@ def keltner_channels(
     }, index=close.index)
 
 
+@register_indicator(
+    name="bb_squeeze",
+    category="VOLATILITY",
+    inputs=["high", "low", "close"],
+    outputs=["bb_squeeze"],
+    parameters={"bb_period": 20, "bb_std": 2.0, "kc_ema": 20, "kc_atr": 10, "kc_mult": 1.5},
+    display_name="Bollinger Band Keltner Squeeze",
+    output_type="series",
+    libraries=["built_in"],
+    description="Bollinger Band Keltner Squeeze",
+    example="bb_squeeze(high, low, close)"
+)
 def bb_squeeze(
     high:        pd.Series,
     low:         pd.Series,

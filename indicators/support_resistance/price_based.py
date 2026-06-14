@@ -46,11 +46,11 @@ def _score_level(price: float, closes: pd.Series, tolerance: float = 0.005) -> f
 @register_indicator(
     name="calculate_swing_levels",
     category="SUPPORT_RESISTANCE",
-    inputs=["high", "low"],
+    inputs=["high", "low", "close"],
     outputs=["levels"],
     parameters={"window": 5}
 )
-def calculate_swing_levels(high: pd.Series, low: pd.Series, window: int = 5) -> List[SRLevel]:
+def calculate_swing_levels(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 5) -> List[SRLevel]:
     """Find key support/resistance levels from recent swing highs/lows."""
     swings = find_swings(high, low, window)
     levels = []
@@ -60,10 +60,12 @@ def calculate_swing_levels(high: pd.Series, low: pd.Series, window: int = 5) -> 
     swing_lows = swings['swing_low_price'].dropna().unique()
     
     for price in swing_highs:
-        levels.append(SRLevel(price=price, type="resistance", source="swing"))
+        strength = _score_level(price, close)
+        levels.append(SRLevel(price=price, level_type="resistance", source="swing", strength=strength))
         
     for price in swing_lows:
-        levels.append(SRLevel(price=price, type="support", source="swing"))
+        strength = _score_level(price, close)
+        levels.append(SRLevel(price=price, level_type="support", source="swing", strength=strength))
         
     return levels
 
@@ -100,7 +102,7 @@ def volume_profile_sr(close: pd.Series, volume: pd.Series, bins: int = 50, promi
     for interval, vol in hvns.items():
         if pd.notna(interval):
             price = interval.mid
-            levels.append(SRLevel(price=price, type="unknown", source="volume_profile"))
+            levels.append(SRLevel(price=price, level_type="unknown", source="volume_profile"))
             
     return levels
 
@@ -139,7 +141,7 @@ def round_number_sr(close: pd.Series, levels_count: int = 5) -> List[SRLevel]:
         if price <= 0:
             continue
         level_type = "resistance" if price > current_price else ("support" if price < current_price else "current")
-        levels.append(SRLevel(price=price, type=level_type, source="round_number"))
+        levels.append(SRLevel(price=price, level_type=level_type, source="round_number"))
         
     return levels
 
@@ -161,9 +163,9 @@ def recent_high_low(high: pd.Series, low: pd.Series, close: pd.Series, window: i
     
     levels = []
     if pd.notna(recent_high):
-        levels.append(SRLevel(price=recent_high, type="resistance", source="recent_high"))
+        levels.append(SRLevel(price=recent_high, level_type="resistance", source="recent_high"))
     if pd.notna(recent_low):
-        levels.append(SRLevel(price=recent_low, type="support", source="recent_low"))
+        levels.append(SRLevel(price=recent_low, level_type="support", source="recent_low"))
         
     return levels
 

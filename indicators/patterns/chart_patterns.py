@@ -66,6 +66,7 @@ def _get_recent_swings(swings: pd.Series, n: int = 3) -> pd.DataFrame:
     return df.ffill()
 
 def triangle_ascending(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 5) -> pd.Series:
+    """Identify ascending triangle patterns (flat top, rising bottom)."""
     highs = _find_swing_highs(high, window)
     lows = _find_swing_lows(low, window)
     
@@ -99,6 +100,7 @@ def triangle_ascending(high: pd.Series, low: pd.Series, close: pd.Series, window
     return res
 
 def triangle_descending(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 5) -> pd.Series:
+    """Identify descending triangle patterns (falling top, flat bottom)."""
     highs = _find_swing_highs(high, window)
     lows = _find_swing_lows(low, window)
     
@@ -132,6 +134,7 @@ def triangle_descending(high: pd.Series, low: pd.Series, close: pd.Series, windo
     return res
 
 def triangle_symmetrical(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 5) -> pd.Series:
+    """Identify symmetrical triangle patterns (converging trendlines)."""
     highs = _find_swing_highs(high, window)
     lows = _find_swing_lows(low, window)
     
@@ -168,6 +171,7 @@ def triangle_symmetrical(high: pd.Series, low: pd.Series, close: pd.Series, wind
     return res
 
 def flag_bullish(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 5) -> pd.Series:
+    """Identify bullish flag patterns (downward parallel channel)."""
     highs = _find_swing_highs(high, window)
     lows = _find_swing_lows(low, window)
     
@@ -201,6 +205,7 @@ def flag_bullish(high: pd.Series, low: pd.Series, close: pd.Series, window: int 
     return res
 
 def flag_bearish(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 5) -> pd.Series:
+    """Identify bearish flag patterns (upward parallel channel)."""
     highs = _find_swing_highs(high, window)
     lows = _find_swing_lows(low, window)
     
@@ -234,9 +239,11 @@ def flag_bearish(high: pd.Series, low: pd.Series, close: pd.Series, window: int 
     return res
 
 def pennant(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 3) -> pd.Series:
+    """Identify pennant patterns (small symmetrical triangle)."""
     return triangle_symmetrical(high, low, close, window)
 
 def wedge_rising(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 5) -> pd.Series:
+    """Identify rising wedge patterns (converging upward trendlines)."""
     highs = _find_swing_highs(high, window)
     lows = _find_swing_lows(low, window)
     
@@ -270,6 +277,7 @@ def wedge_rising(high: pd.Series, low: pd.Series, close: pd.Series, window: int 
     return res
 
 def wedge_falling(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 5) -> pd.Series:
+    """Identify falling wedge patterns (converging downward trendlines)."""
     highs = _find_swing_highs(high, window)
     lows = _find_swing_lows(low, window)
     
@@ -303,6 +311,7 @@ def wedge_falling(high: pd.Series, low: pd.Series, close: pd.Series, window: int
     return res
 
 def double_top(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 5) -> pd.Series:
+    """Identify double top patterns (two similar highs with a dip between)."""
     highs = _find_swing_highs(high, window)
     lows = _find_swing_lows(low, window)
     
@@ -328,6 +337,7 @@ def double_top(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 
     return res
 
 def double_bottom(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 5) -> pd.Series:
+    """Identify double bottom patterns (two similar lows with a bounce between)."""
     highs = _find_swing_highs(high, window)
     lows = _find_swing_lows(low, window)
     
@@ -353,6 +363,7 @@ def double_bottom(high: pd.Series, low: pd.Series, close: pd.Series, window: int
     return res
 
 def head_and_shoulders(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 5) -> pd.Series:
+    """Identify head and shoulders patterns (three peaks, middle is highest)."""
     highs = _find_swing_highs(high, window)
     lows = _find_swing_lows(low, window)
     
@@ -384,6 +395,7 @@ def head_and_shoulders(high: pd.Series, low: pd.Series, close: pd.Series, window
     return res
 
 def inverse_head_and_shoulders(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 5) -> pd.Series:
+    """Identify inverse head and shoulders patterns (three troughs, middle is lowest)."""
     highs = _find_swing_highs(high, window)
     lows = _find_swing_lows(low, window)
     
@@ -415,6 +427,7 @@ def inverse_head_and_shoulders(high: pd.Series, low: pd.Series, close: pd.Series
     return res
 
 def cup_and_handle(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 5) -> pd.Series:
+    """Identify cup and handle patterns (U-shape cup followed by slight downward drift)."""
     highs = _find_swing_highs(high, window)
     lows = _find_swing_lows(low, window)
     
@@ -487,7 +500,6 @@ def scan_all_chart(df: pd.DataFrame) -> pd.DataFrame:
     return res
 
 __all__ = [
-    "_find_swing_highs", "_find_swing_lows", "_fit_trendline", "_lines_converge", "_lines_diverge",
     "triangle_ascending", "triangle_descending", "triangle_symmetrical",
     "flag_bullish", "flag_bearish", "pennant", "wedge_rising", "wedge_falling",
     "double_top", "double_bottom", "head_and_shoulders", "inverse_head_and_shoulders",

@@ -17,10 +17,23 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from indicators.volatility import atr
+from indicators.registry import register_indicator
 
 __all__ = ["supertrend", "adx"]
 
 
+@register_indicator(
+    name="supertrend",
+    category="TREND",
+    inputs=["high", "low", "close"],
+    outputs=["supertrend", "direction", "buy_signal", "sell_signal"],
+    parameters={"period": 10, "multiplier": 3.0},
+    display_name="Supertrend",
+    output_type="dataframe",
+    libraries=["built_in"],
+    description="Supertrend",
+    example="supertrend(high, low, close, 10, 3.0)"
+)
 def supertrend(
     high:       pd.Series,
     low:        pd.Series,
@@ -146,6 +159,18 @@ def supertrend(
     }, index=close.index)
 
 
+@register_indicator(
+    name="adx",
+    category="TREND",
+    inputs=["high", "low", "close"],
+    outputs=["adx", "plus_di", "minus_di"],
+    parameters={"period": 14},
+    display_name="Average Directional Index",
+    output_type="dataframe",
+    libraries=["built_in", "talib", "pandas_ta"],
+    description="Average Directional Index",
+    example="adx(high, low, close, 14)"
+)
 def adx(
     high:   pd.Series,
     low:    pd.Series,

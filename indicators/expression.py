@@ -17,6 +17,16 @@ from typing import Any, Dict
 import numpy as np
 import pandas as pd
 from indicators.engine import IndicatorEngine
+from dataclasses import dataclass, field
+from functools import lru_cache
+from typing import Set
+
+@dataclass
+class CompiledExpression:
+    """Compiled representation of an indicator expression."""
+    tree: ast.AST
+    required_columns: Set[str] = field(default_factory=set)
+    required_indicators: Set[str] = field(default_factory=set)
 
 # Supported safe operators
 _OPERATORS = {
@@ -59,6 +69,9 @@ class ExpressionParser:
 
         Replaces 'and' / 'or' with bitwise '&' / '|' prior to parsing
         to support pandas element-wise logical operations.
+        
+        Raises:
+            ValueError: If expression is empty or invalid syntax.
         """
         if not expr or not expr.strip():
             raise ValueError("Expression cannot be empty")
@@ -69,17 +82,67 @@ class ExpressionParser:
         expr = re.sub(r'(?i)\band\b', 'and', expr)
         expr = re.sub(r'(?i)\bor\b', 'or', expr)
 
+        compiled = self.parse(expr)
+        return self._eval(compiled.tree)
+
+    @classmethod
+    @lru_cache(maxsize=128)
+    def parse(cls, expr: str) -> CompiledExpression:
+        """
+        Parse an expression string into a CompiledExpression.
+        
+        Raises:
+            ValueError: If expression is empty or invalid syntax.
+        """
+        if not expr or not expr.strip():
+            raise ValueError("Expression cannot be empty")
+
+        expr = re.sub(r'(?i)\band\b', 'and', expr)
+        expr = re.sub(r'(?i)\bor\b', 'or', expr)
+
         try:
             tree = ast.parse(expr, mode="eval").body
         except SyntaxError as e:
             raise ValueError(f"Invalid expression syntax: {expr}") from e
+            
+        required_columns = set()
+        required_indicators = set()
+        
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name):
+                if node.id.lower() not in ("true", "false"):
+                    required_columns.add(node.id)
+            elif isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name):
+                    required_indicators.add(node.func.id)
+                    # Exclude the function name from required columns if it was added
+                    required_columns.discard(node.func.id)
+                    
+        return CompiledExpression(
+            tree=tree,
+            required_columns=required_columns,
+            required_indicators=required_indicators
+        )
 
-        return self._eval(tree)
+    @classmethod
+    def validate(cls, expr: str) -> tuple[bool, str]:
+        """
+        Validate an expression string.
+        Returns a tuple of (is_valid, error_message).
+        """
+        try:
+            cls.parse(expr)
+            return True, ""
+        except Exception as e:
+            return False, str(e)
 
     def evaluate_boolean(self, expr: str) -> pd.Series:
         """
         Evaluate the expression and ensure the result is a boolean pandas Series.
         Useful for screener rules.
+        
+        Raises:
+            TypeError: If result cannot be converted to a boolean Series.
         """
         result = self.evaluate(expr)
         if isinstance(result, pd.Series):
@@ -144,17 +207,22 @@ class ExpressionParser:
             return op_func(left, right)
 
         elif isinstance(node, ast.Call):
-            if not isinstance(node.func, ast.Name):
-                raise ValueError("Only direct function calls are supported")
-            func_name = node.func.id
             args = [self._eval(arg) for arg in node.args]
             kwargs = {kw.arg: self._eval(kw.value) for kw in node.keywords if kw.arg}
 
-            # If it's a known data column/series but called like a func, that's an error
-            if func_name in self.data:
-                raise ValueError(f"'{func_name}' is a data series, not a function.")
-
-            return self.engine.compute(func_name, *args, **kwargs)
+            if isinstance(node.func, ast.Name):
+                func_name = node.func.id
+                # If it's a known data column/series but called like a func, that's an error
+                if func_name in self.data:
+                    raise ValueError(f"'{func_name}' is a data series, not a function.")
+                return self.engine.compute(func_name, *args, **kwargs)
+            elif isinstance(node.func, ast.Attribute):
+                func_callable = self._eval(node.func)
+                if callable(func_callable):
+                    return func_callable(*args, **kwargs)
+                raise TypeError("Attribute is not callable")
+            else:
+                raise ValueError("Only direct function calls and method attributes are supported")
 
         elif isinstance(node, ast.Subscript):
             value = self._eval(node.value)
@@ -188,6 +256,14 @@ class ExpressionParser:
                 return value[slice_val]
 
             raise TypeError(f"Unsupported subscript type {type(slice_val).__name__} on {type(value).__name__}")
+
+        elif isinstance(node, ast.Attribute):
+            value = self._eval(node.value)
+            if isinstance(value, pd.Series):
+                if node.attr == "shift":
+                    # We return a callable that applies shift, to be used in ast.Call
+                    return value.shift
+            raise TypeError(f"Unsupported attribute '{node.attr}' on {type(value).__name__}")
 
         else:
             raise TypeError(f"Unsupported syntax construct: {type(node).__name__}")
