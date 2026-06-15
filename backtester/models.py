@@ -38,335 +38,12 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from broker.upstox.commission import CommissionModel, Segment
 from risk.config import RiskConfig
 
-
-# ---------------------------------------------------------------------------
-# SegmentPreset — human-friendly aliases for common trading setups
-# ---------------------------------------------------------------------------
-
-class SegmentPreset:
-    """
-    Factory for common BacktestConfig setups.
-
-    Eliminates the need to manually specify Segment, allow_shorting,
-    intraday_squareoff, and holding-type related flags for each backtest.
-
-    Usage
-    -----
-    >>> cfg = SegmentPreset.intraday(capital=500_000, stop_loss_pct=1.5)
-    >>> cfg = SegmentPreset.delivery(capital=1_000_000)
-    >>> cfg = SegmentPreset.futures(capital=500_000, allow_shorting=True)
-    >>> cfg = SegmentPreset.options_buy(capital=200_000)
-    """
-
-    @staticmethod
-    def intraday(
-        capital:        float = 500_000.0,
-        allow_shorting: bool  = True,
-        **kwargs,
-    ) -> "BacktestConfig":
-        """
-        Equity Intraday (MIS) preset.
-
-        P3 FIX: removed ``squareoff_time`` parameter that was accepted
-        but silently ignored (BacktestConfig has no such field).
-        Fixed docstring false claim that max_drawdown_pct=0.20 is set
-        here — it is the BacktestConfig dataclass default, not set by
-        this preset explicitly.
-
-        Sets:
-          - segment            = EQUITY_INTRADAY
-          - intraday_squareoff = True
-          - allow_shorting     = True (both legs by default)
-          Note: max_drawdown_pct uses BacktestConfig default (0.20);
-          pass max_drawdown_pct=<value> via **kwargs to override.
-        """
-        return BacktestConfig(
-            initial_capital    = capital,
-            segment            = Segment.EQUITY_INTRADAY,
-            allow_shorting     = allow_shorting,
-            intraday_squareoff = True,
-            **kwargs,
-        )
-
-    @staticmethod
-    def delivery(
-        capital:        float = 500_000.0,
-        allow_shorting: bool  = False,
-        **kwargs,
-    ) -> "BacktestConfig":
-        """
-        Equity Delivery (CNC) preset.
-
-        Sets:
-          - segment            = EQUITY_DELIVERY
-          - intraday_squareoff = False (positions can be held overnight)
-          - allow_shorting     = False (CNC delivery = long only by default)
-        """
-        return BacktestConfig(
-            initial_capital    = capital,
-            segment            = Segment.EQUITY_DELIVERY,
-            allow_shorting     = allow_shorting,
-            intraday_squareoff = False,
-            **kwargs,
-        )
-
-    @staticmethod
-    def futures(
-        capital:        float = 500_000.0,
-        allow_shorting: bool  = True,
-        **kwargs,
-    ) -> "BacktestConfig":
-        """
-        Equity/Index Futures (NRML) preset.
-
-        Sets:
-          - segment            = EQUITY_FUTURES
-          - intraday_squareoff = False (NRML positions held overnight)
-          - allow_shorting     = True (futures are bidirectional)
-        """
-        return BacktestConfig(
-            initial_capital    = capital,
-            segment            = Segment.EQUITY_FUTURES,
-            allow_shorting     = allow_shorting,
-            intraday_squareoff = False,
-            **kwargs,
-        )
-
-    @staticmethod
-    def options_buy(
-        capital:        float = 200_000.0,
-        **kwargs,
-    ) -> "BacktestConfig":
-        """
-        Equity/Index Options Buy preset.
-
-        Sets:
-          - segment            = EQUITY_OPTIONS
-          - allow_shorting     = False (buy-side options only)
-          - intraday_squareoff = False
-        """
-        return BacktestConfig(
-            initial_capital    = capital,
-            segment            = Segment.EQUITY_OPTIONS,
-            allow_shorting     = False,
-            intraday_squareoff = False,
-            **kwargs,
-        )
-
-    @staticmethod
-    def from_string(
-        preset:  str,
-        capital: float = 500_000.0,
-        **kwargs,
-    ) -> "BacktestConfig":
-        """
-        Create a BacktestConfig from a string preset name.
-
-        Parameters
-        ----------
-        preset : str
-            One of: 'intraday', 'delivery', 'futures', 'options_buy'.
-            Case-insensitive. Aliases: 'mis' = 'intraday', 'cnc' = 'delivery',
-            'nrml' = 'futures'.
-        capital : float
-
-        Examples
-        --------
-        >>> cfg = SegmentPreset.from_string("intraday", capital=500_000)
-        >>> cfg = SegmentPreset.from_string("mis", capital=500_000)
-        """
-        _map = {
-            "intraday":    SegmentPreset.intraday,
-            "mis":         SegmentPreset.intraday,
-            "delivery":    SegmentPreset.delivery,
-            "cnc":         SegmentPreset.delivery,
-            "swing":       SegmentPreset.delivery,
-            "futures":     SegmentPreset.futures,
-            "nrml":        SegmentPreset.futures,
-            "options_buy": SegmentPreset.options_buy,
-            "options":     SegmentPreset.options_buy,
-        }
-        key = preset.lower().strip()
-        if key not in _map:
-            raise ValueError(
-                f"Unknown segment preset: {preset!r}. "
-                f"Valid values: {sorted(_map.keys())}"
-            )
-        return _map[key](capital=capital, **kwargs)
-
-logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-INTRADAY_SQUAREOFF = dtime(15, 20)
-_HERE = Path(__file__).resolve().parent.parent   # project root
-
-
-# ---------------------------------------------------------------------------
-# OrderType enum (kept in models so everything can import from one place)
-# ---------------------------------------------------------------------------
-
-class OrderType(Enum):
-    """
-    Supported order types for backtest simulation.
-
-    ``MARKET``
-        Execute at the open of the next bar after the signal bar.
-        This is the default and the most conservative (no fill-price optimism).
-
-    ``LIMIT``
-        Place a limit order below (long) or above (short) the signal close
-        by ``limit_offset_pct`` percent.  Fills only if the bar's low
-        (long) or high (short) reaches the limit price.
-
-    ``STOP``
-        Enter once price breaches a stop level.  Models momentum breakout
-        entries.
-
-    ``STOP_LIMIT``
-        Trigger at stop price, fill only if limit price is still reachable.
-        Prevents catastrophic fills in fast markets.
-
-    ``TRAILING_STOP``
-        Dynamic stop-loss that follows price in the favourable direction,
-        never retreating against the trade.
-    """
-    MARKET        = "MARKET"
-    LIMIT         = "LIMIT"
-    STOP          = "STOP"
-    STOP_LIMIT    = "STOP_LIMIT"
-    TRAILING_STOP = "TRAILING_STOP"
-
-
-class TrailingType(Enum):
-    """Whether trailing stop distance is measured in % or fixed ₹ amount."""
-    PERCENT = "PERCENT"
-    AMOUNT  = "AMOUNT"
-
-
-# ---------------------------------------------------------------------------
-# BacktestConfig
-# ---------------------------------------------------------------------------
-
-@dataclass
-class BacktestConfig:
-    """
-    Complete configuration for one backtest run.
-
-    All parameters have sensible defaults so a minimal config is::
-
-        cfg = BacktestConfig(initial_capital=500_000)
-
-    Parameters
-    ----------
-    initial_capital : float
-        Starting portfolio value in ₹.  Default 500 000.
-    capital_risk_pct : float
-        Maximum fraction of capital to risk on a single trade (for
-        ATR-based sizing).  Default 0.02 (2 %).
-    fixed_quantity : int
-        If > 0, use this exact share count for every trade and ignore
-        ``capital_risk_pct``.  0 = use dynamic risk-based sizing.
-    max_positions : int
-        Maximum simultaneous open positions (0 = unlimited).
-    max_drawdown_pct : float
-        Halt the backtest if equity falls more than this fraction below
-        its peak.  Default 0.20 (20 %).
-    segment : Segment
-        Market segment for charge calculation (delivery, intraday, futures …).
-    allow_shorting : bool
-        If False, ``signal == -1`` closes an existing long but does NOT
-        open a short.  Default False.
-    intraday_squareoff : bool
-        Force-close all positions at 15:20 IST on each session.
-        Requires a timezone-aware DatetimeIndex.  Default False.
-    lot_size : int
-        Lot size for F&O contracts.  Ignored for equities.  Default 1.
-    stop_loss_atr_mult : float
-        Attach an ATR-based fixed stop-loss.  Stop = entry ± mult × ATR(14).
-        0 = disabled.  Default 2.0.
-    default_order_type : OrderType
-        Entry order type.  Default MARKET.
-    limit_offset_pct : float
-        For LIMIT entries: % offset from signal-bar close.  Default 0.2.
-    stop_loss_pct : float
-        Fixed % stop-loss on all trades (overrides ATR when > 0).  Default 0.
-    use_trailing_stop : bool
-        Attach a trailing stop to every opened position.  Default False.
-    trailing_stop_pct : float
-        Trailing stop distance in % of price (use with use_trailing_stop).
-    trailing_stop_amt : float
-        Trailing stop distance in fixed ₹ (alternative to trailing_stop_pct).
-    save_trade_log : bool
-        Write a trade-log CSV to ``strategies/output/trade/``.
-    save_raw_data : bool
-        Write OHLCV + indicator + signal CSV to ``strategies/output/raw_data/``.
-    save_chart : bool
-        Write a Streak-style PNG chart to ``strategies/output/chart/``.
-    generate_summary : bool
-        Write a performance summary JSON/CSV after the run.
-    run_label : str
-        Prefix for all output filenames.  Default ``"backtest"``.
-    max_candles : int
-        Maximum candles rendered in the PNG chart.  Default 2000.
-    commission_model : CommissionModel
-        Commission calculator instance.  Defaults to a fresh CommissionModel().
-    """
-    # ── Capital & sizing ────────────────────────────────────────────────────
-    initial_capital:    float           = 500_000.0
-    capital_risk_pct:   float           = 0.02
-    fixed_quantity:     int             = 0
-    max_positions:      int             = 0
-    max_drawdown_pct:   float           = 0.20
-    # ── Market parameters ───────────────────────────────────────────────────
-    segment:            Segment         = Segment.EQUITY_DELIVERY
-    allow_shorting:     bool            = False
-    intraday_squareoff: bool            = False
-    lot_size:           int             = 1
-    # ── Stop / size helpers ─────────────────────────────────────────────────
-    stop_loss_atr_mult: float           = 2.0
-    # ── Order type settings ─────────────────────────────────────────────────
-    default_order_type:  OrderType      = OrderType.MARKET
-    limit_offset_pct:    float          = 0.2
-    stop_loss_pct:       float          = 0.0
-    use_trailing_stop:   bool           = False
-    trailing_stop_pct:   float          = 0.0
-    trailing_stop_amt:   float          = 0.0
-    # ── Risk config ─────────────────────────────────────────────────────────
-    risk_config: RiskConfig = field(default_factory=RiskConfig)
-    # ── Output flags ────────────────────────────────────────────────────────
-    save_trade_log:      bool           = False
-    save_raw_data:       bool           = False
-    save_chart:          bool           = False
-    generate_summary:    bool           = False
-    run_label:           str            = "backtest"
-    max_candles:         int            = 2000
-    # ── Commission ──────────────────────────────────────────────────────────
-    commission_model:   CommissionModel = field(default_factory=CommissionModel)
-
-    def validate(self) -> None:
-        """Raise ValueError for obviously wrong configurations."""
-        if self.initial_capital <= 0:
-            raise ValueError("initial_capital must be > 0")
-        if not (0.0 < self.capital_risk_pct <= 1.0):
-            raise ValueError("capital_risk_pct must be in (0, 1]")
-        if self.fixed_quantity < 0:
-            raise ValueError("fixed_quantity must be >= 0")
-        if self.max_drawdown_pct <= 0 or self.max_drawdown_pct > 1:
-            raise ValueError("max_drawdown_pct must be in (0, 1]")
-        if self.use_trailing_stop:
-            if self.trailing_stop_pct == 0 and self.trailing_stop_amt == 0:
-                raise ValueError(
-                    "use_trailing_stop=True requires trailing_stop_pct or trailing_stop_amt > 0"
-                )
-            if self.trailing_stop_pct > 0 and self.trailing_stop_amt > 0:
-                raise ValueError(
-                    "Provide trailing_stop_pct OR trailing_stop_amt, not both"
-                )
+from backtester.config import BacktestConfig, SegmentPreset, INTRADAY_SQUAREOFF, TrailingType
+from backtester.orders import (
+    OrderType, StopLossType, TakeProfitType, StopLossSpec, TakeProfitSpec, GTTOrder
+)
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +107,16 @@ class Position:
     trailing_stop_amt:   float = 0.0
     trailing_stop_level: float = 0.0
     order_type:          OrderType = OrderType.MARKET
+    
+    # NEW fields from Phase C
+    pyramid_level:       int   = 1
+    slippage_applied:    float = 0.0
+    sl_spec:             StopLossSpec = field(default_factory=StopLossSpec)
+    tp_spec:             TakeProfitSpec = field(default_factory=TakeProfitSpec)
+    target_price:        Optional[float] = None
+    partial_exit_done:   bool = False
+    time_exit_bar:       Optional[int] = None
+    gtt_order:           Optional[GTTOrder] = None
 
     # ------------------------------------------------------------------
     def unrealised_pnl(self, current_price: float) -> float:
@@ -442,28 +129,83 @@ class Position:
         self.mfe = max(self.mfe, move)
         self.mae = min(self.mae, move)
 
-    def update_trailing_stop(self, high: float, low: float) -> None:
+    def update_chandelier_stop(self, high_series: np.ndarray, low_series: np.ndarray, atr: float, bar_idx: int) -> None:
+        """Update trailing stop using Chandelier logic."""
+        if not self.sl_spec or not self.sl_spec.is_active() or self.sl_spec.sl_type.name != "CHANDELIER":
+            return
+        if atr is None or atr <= 0:
+            return
+            
+        period = self.sl_spec.chandelier_period
+        start_idx = max(0, bar_idx - period)
+        
+        if self.direction == 1:
+            highest_high = np.max(high_series[start_idx:bar_idx+1])
+            ideal = highest_high - (self.sl_spec.value * atr)
+            if self.trailing_stop_level == 0.0:
+                self.trailing_stop_level = self.entry_price - (self.sl_spec.value * atr)
+            self.trailing_stop_level = max(self.trailing_stop_level, ideal)
+        else:
+            lowest_low = np.min(low_series[start_idx:bar_idx+1])
+            ideal = lowest_low + (self.sl_spec.value * atr)
+            if self.trailing_stop_level == 0.0:
+                self.trailing_stop_level = self.entry_price + (self.sl_spec.value * atr)
+            self.trailing_stop_level = min(self.trailing_stop_level, ideal)
+
+    def update_trailing_stop(self, high: float, low: float, atr: Optional[float] = None, period_high: Optional[float] = None) -> None:
         """
         Advance the trailing stop level if price moved in our favour.
 
         The stop NEVER moves against the trade.
         """
-        if self.trailing_stop_pct > 0:
-            dist = self.entry_price * (self.trailing_stop_pct / 100.0)
-        elif self.trailing_stop_amt > 0:
-            dist = self.trailing_stop_amt
+        if self.sl_spec.is_active() and self.sl_spec.is_trailing():
+            if self.sl_spec.sl_type == StopLossType.TRAILING_PCT:
+                dist = self.entry_price * (self.sl_spec.value / 100.0)
+            elif self.sl_spec.sl_type == StopLossType.TRAILING_POINTS:
+                dist = self.sl_spec.value
+            elif self.sl_spec.sl_type == StopLossType.TRAILING_TICKS:
+                dist = self.sl_spec.value * self.sl_spec.tick_size
+            elif self.sl_spec.sl_type == StopLossType.TRAILING_ATR:
+                if atr is None:
+                    return
+                dist = self.sl_spec.value * atr
+            elif self.sl_spec.sl_type == StopLossType.CHANDELIER:
+                if atr is None or period_high is None:
+                    return
+                dist = self.sl_spec.value * atr
+            else:
+                dist = 0.0
         else:
-            return   # no trailing stop configured
+            if self.trailing_stop_pct > 0:
+                dist = self.entry_price * (self.trailing_stop_pct / 100.0)
+            elif self.trailing_stop_amt > 0:
+                dist = self.trailing_stop_amt
+            else:
+                return   # no trailing stop configured
 
         if self.direction == 1:   # LONG — trail behind high
-            ideal = high - dist
+            if self.sl_spec.is_active() and self.sl_spec.sl_type == StopLossType.CHANDELIER:
+                ideal = period_high - dist
+            else:
+                ideal = high - dist
+                
             if self.trailing_stop_level == 0.0:
-                self.trailing_stop_level = self.entry_price - dist
+                if self.sl_spec.is_active() and self.sl_spec.sl_type == StopLossType.CHANDELIER:
+                    self.trailing_stop_level = self.entry_price - dist
+                else:
+                    self.trailing_stop_level = self.entry_price - dist
             self.trailing_stop_level = max(self.trailing_stop_level, ideal)
         else:                     # SHORT — trail above low
-            ideal = low + dist
+            if self.sl_spec.is_active() and self.sl_spec.sl_type == StopLossType.CHANDELIER:
+                ideal = period_high + dist
+            else:
+                ideal = low + dist
+                
             if self.trailing_stop_level == 0.0:
-                self.trailing_stop_level = self.entry_price + dist
+                if self.sl_spec.is_active() and self.sl_spec.sl_type == StopLossType.CHANDELIER:
+                    self.trailing_stop_level = self.entry_price + dist
+                else:
+                    self.trailing_stop_level = self.entry_price + dist
             self.trailing_stop_level = min(self.trailing_stop_level, ideal)
 
     def is_trailing_stop_triggered(self, open_p: float, low: float, high: float):
@@ -502,6 +244,28 @@ class Position:
             if high >= self.stop_price:
                 return True, self.stop_price
         return False, 0.0
+
+    def is_target_triggered(self, open_p: float, low: float, high: float) -> tuple[bool, float]:
+        """Returns ``(triggered: bool, fill_price: float)`` for take profit."""
+        if self.target_price is None:
+            return False, 0.0
+        if self.direction == 1:
+            if open_p >= self.target_price:
+                return True, open_p
+            if high >= self.target_price:
+                return True, self.target_price
+        else:
+            if open_p <= self.target_price:
+                return True, open_p
+            if low <= self.target_price:
+                return True, self.target_price
+        return False, 0.0
+
+    def is_time_exit_due(self, current_bar_idx: int) -> bool:
+        """Returns True if the time-based exit bar has been reached."""
+        if self.time_exit_bar is not None and current_bar_idx >= self.time_exit_bar:
+            return True
+        return False
 
     @property
     def direction_label(self) -> str:
@@ -567,6 +331,13 @@ class Trade:
     mae:                  float = 0.0
     mfe:                  float = 0.0
     cumulative_portfolio: float = 0.0
+    pyramid_level:        int   = 1
+    slippage:             float = 0.0
+    tag:                  str   = ""
+    sl_type:              str   = ""
+    tp_type:              str   = ""
+    exit_reason:          str   = ""
+    partial:              bool  = False
 
     def to_dict(self) -> dict:
         """Return a JSON-serialisable dict (used for CSV export)."""
@@ -627,6 +398,9 @@ class BacktestResult:
         equity_curve: pd.Series,
         drawdown:     pd.Series,
         signals_df:   pd.DataFrame,
+        run_id:       str = "",
+        strategy_name: str = "",
+        created_at:   str = "",
     ) -> None:
         self.config       = config
         self.symbol       = symbol
@@ -634,6 +408,9 @@ class BacktestResult:
         self.equity_curve = equity_curve
         self.drawdown     = drawdown
         self.signals_df   = signals_df
+        self.run_id       = run_id
+        self.strategy_name = strategy_name
+        self.created_at   = created_at
         self._metrics: Optional[Dict] = None   # lazy-computed
 
     # ------------------------------------------------------------------
@@ -725,3 +502,79 @@ class BacktestResult:
             "metrics": self.metrics(),
             "trade_count": len(self.trade_log),
         }
+
+    def export(self, output_dir: str | Path, formats: List[str] = None) -> List[Path]:
+        """Export backtest results using BacktestExporter."""
+        from backtester.exporter import BacktestExporter
+        exporter = BacktestExporter(self, output_dir)
+        return exporter.export(formats)
+
+
+# ---------------------------------------------------------------------------
+# PortfolioResult (multi-symbol output container)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PortfolioResult:
+    """
+    Container returned by PortfolioManager or backtesting multiple symbols.
+    """
+    run_id: str
+    strategy_name: str
+    created_at: str
+    config: BacktestConfig
+    symbol_results: Dict[str, BacktestResult]  # per-symbol
+    combined_equity_curve: pd.Series           # shared capital equity
+    combined_drawdown: pd.Series
+    combined_trade_log: List[Trade]            # all trades merged
+
+    def metrics(self) -> Dict:
+        """Return combined metrics dict."""
+        from backtester.performance import compute_performance
+        return compute_performance(
+            trade_log=self.combined_trade_log,
+            equity_curve=self.combined_equity_curve,
+            config=self.config
+        )
+
+    def summary(self) -> str:
+        """Return a formatted text summary for the portfolio."""
+        m = self.metrics()
+        width = 55
+        lines = [
+            "", "=" * width,
+            f"  PORTFOLIO RESULTS — {len(self.symbol_results)} Symbols",
+            "=" * width,
+        ]
+        order = [
+            ("Start Date",             "start_date"),
+            ("End Date",               "end_date"),
+            ("Initial Capital",        "initial_capital"),
+            ("Final Capital",          "final_capital"),
+            ("Total Net P&L",          "total_net_pnl"),
+            ("Total Return",           "total_return_pct"),
+            ("CAGR",                   "cagr_pct"),
+            ("Sharpe Ratio",           "sharpe_ratio"),
+            ("Sortino Ratio",          "sortino_ratio"),
+            ("Max Drawdown",           "max_drawdown_pct"),
+            ("Total Trades",           "total_trades"),
+            ("Win Rate",               "win_rate_pct"),
+        ]
+        for label, key in order:
+            val = m.get(key, "N/A")
+            if isinstance(val, float):
+                if key in ("total_return_pct", "cagr_pct", "win_rate_pct", "max_drawdown_pct"):
+                    val = f"{val:.2f}%"
+                elif key in ("sharpe_ratio", "sortino_ratio"):
+                    val = f"{val:.3f}"
+                else:
+                    val = f"₹{val:,.2f}"
+            lines.append(f"  {label:<26}: {val}")
+        lines.append("=" * width)
+        return "\n".join(lines)
+
+    def export(self, output_dir: str | Path, formats: List[str] = None) -> List[Path]:
+        """Export portfolio results using BacktestExporter."""
+        from backtester.exporter import BacktestExporter
+        exporter = BacktestExporter(self, output_dir)
+        return exporter.export(formats)

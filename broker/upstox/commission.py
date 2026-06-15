@@ -102,3 +102,34 @@ def infer_segment(instrument_type: str, holding_type: str = "CNC") -> Segment:
     if it in ("FUTCOM",): return Segment.COMMODITY_FUTURES
     if it in ("OPTCOM",): return Segment.COMMODITY_OPTIONS
     raise ValueError(f"Unknown instrument_type={instrument_type!r}, holding_type={holding_type!r}")
+
+# Adapter for Backtester
+try:
+    from backtester.commission import CommissionBase, ChargeBreakdown as BacktesterChargeBreakdown
+    
+    class UpstoxCommission(CommissionBase):
+        def __init__(self):
+            self._model = CommissionModel()
+            
+        def calculate(self, side: str, quantity: int, price: float, segment: str) -> BacktesterChargeBreakdown:
+            try:
+                seg_enum = Segment(segment)
+            except ValueError:
+                raise ValueError(f"Unknown segment: {segment}")
+                
+            res = self._model.calculate(seg_enum, side, quantity, price)
+            
+            return BacktesterChargeBreakdown(
+                segment=res.segment, side=res.side, quantity=res.quantity,
+                price=res.price, trade_value=res.trade_value,
+                brokerage=res.brokerage, stt=res.stt,
+                transaction_charge=res.transaction_charge,
+                sebi_fee=res.sebi_fee, gst=res.gst,
+                stamp_duty=res.stamp_duty, dp_charge=res.dp_charge,
+                total=res.total
+            )
+
+        def segment_names(self) -> list[str]:
+            return [s.value for s in Segment]
+except ImportError:
+    pass

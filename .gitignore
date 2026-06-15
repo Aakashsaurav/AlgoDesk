@@ -99,9 +99,13 @@ tests/
 *.pdf
 *.parquet
 *.db
+*.html
 
 # ── Miscellaneous Files ─────────────────────────────────────────────────────────────
 *.txt
 artifacts/
 .mdignore
 orb_backtest.py
+screener/rules_old.py
+screener/strategy_screener_old.py
+screener/engine_old.py

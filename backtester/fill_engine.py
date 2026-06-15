@@ -2,38 +2,6 @@
 backtester/fill_engine.py
 --------------------------
 Order fill and position lifecycle logic.
-
-RESPONSIBILITIES
-================
-* Open a new position (entry fill): debit cash, build a :class:`Position`.
-* Close an existing position (exit fill): credit cash, build a :class:`Trade`.
-* Check and trigger fixed stop-losses.
-* Check and trigger trailing stops.
-* Check and fill pending LIMIT / STOP / STOP-LIMIT entry orders.
-
-DESIGN
-======
-``FillEngine`` is a *stateless helper* — it receives all state as arguments
-and returns results as plain Python values.  This means:
-
-* The event loop owns all mutable state (``cash``, ``positions``, ``trades``).
-* ``FillEngine`` methods are pure functions of their inputs.
-* Unit testing is trivial: no mocking needed.
-
-FILL PRICE MODEL
-================
-All fills occur at prices derived from bar OHLCV data:
-
-* **Market entry** → next bar's ``open`` (conservative; no fill-price optimism).
-* **Limit entry** → ``limit_price`` when ``low <= limit_price`` for buys.
-* **Stop entry** → ``stop_price`` when ``high >= stop_price`` for buy stops.
-* **Stop-loss exit** → ``open`` if bar opens through the stop, else ``stop_price``.
-* **Trailing stop exit** → same gap logic as stop-loss.
-* **Signal exit** → next bar's ``open``.
-
-Gap handling is applied consistently: when price opens beyond an order
-price, the fill is at ``open_p`` (not at the order price), preventing
-unrealistic fills.
 """
 
 from __future__ import annotations
@@ -41,46 +9,60 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 from typing import List, Optional, Tuple
-
+import numpy as np
 import pandas as pd
 
-from backtester.models import BacktestConfig, Position, Trade, OrderType
+from backtester.models import BacktestConfig, Position, Trade
+from backtester.orders import OrderType, PendingOrder, GTTOrder, StopLossSpec, TakeProfitSpec
 from backtester.order_types import (
-    PendingOrder,
     check_limit_fill,
     check_stop_fill,
     check_stop_limit_fill,
+    check_amo_fill,
 )
 from backtester.position_sizer import compute_quantity
-from broker.upstox.commission import CommissionModel
+from backtester.commission import CommissionBase
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# FillEngine
-# ---------------------------------------------------------------------------
+def _max_affordable_qty(
+    cash: float,
+    price: float,
+    desired_qty: int,
+    commission: CommissionBase,
+    segment: str,
+    side: str,
+    lot_size: int = 1
+) -> int:
+    """Binary search to find max quantity affordable after commissions."""
+    if cash <= 0 or price <= 0 or desired_qty <= 0:
+        return 0
+    low = 0
+    high = desired_qty
+    best = 0
+    iterations = 0
+    while low <= high and iterations < 20:
+        iterations += 1
+        mid = (low + high) // 2
+        mid = (mid // lot_size) * lot_size
+        if mid == 0:
+            if low == high: break
+            low = mid + 1
+            continue
+            
+        chg = commission.calculate(side, mid, price, segment)
+        total_cost = (price * mid) + chg.total if side == "BUY" else chg.total
+        if cash >= total_cost:
+            best = mid
+            low = mid + lot_size
+        else:
+            high = mid - lot_size
+    return best
 
 class FillEngine:
-    """
-    Stateless helper that handles all order fill mechanics.
-
-    Instantiate once per :class:`backtester.engine.BacktestEngine` run and
-    pass ``config`` at construction time.  All methods are O(1) per call.
-
-    Parameters
-    ----------
-    config : BacktestConfig
-        The same config object used by the engine.
-    """
-
     def __init__(self, config: BacktestConfig) -> None:
         self.cfg        = config
-        self.commission = config.commission_model
-
-    # ------------------------------------------------------------------
-    # Entry fill
-    # ------------------------------------------------------------------
+        self.commission = config.commission
 
     def open_position(
         self,
@@ -91,112 +73,132 @@ class FillEngine:
         bar_idx:      int,
         bar_time:     pd.Timestamp,
         entry_signal: str,
+        existing_positions: int = 0,
         atr:          Optional[float] = None,
         stop_price:   Optional[float] = None,
+        sl_spec:      Optional[StopLossSpec] = None,
+        tp_spec:      Optional[TakeProfitSpec] = None,
+        gtt_order:    Optional[GTTOrder] = None,
     ) -> Tuple[Optional[Position], float]:
-        """
-        Simulate a market-order entry fill.
-
-        Parameters
-        ----------
-        direction : int
-            +1 LONG, -1 SHORT.
-        exec_price : float
-            Fill price (next bar's open for market orders).
-        cash : float
-            Available capital before this trade.
-        symbol : str
-        bar_idx : int
-        bar_time : pd.Timestamp
-        entry_signal : str
-            Human-readable label (e.g. ``"Market Signal"``).
-        atr : float, optional
-            Current ATR(14) — used for risk-based sizing when no stop price.
-        stop_price : float, optional
-            Fixed stop-loss price pre-computed by the caller.
-
-        Returns
-        -------
-        (position, new_cash)
-            ``position`` is None if the order could not be filled
-            (insufficient capital, zero quantity, etc.).
-        """
         cfg = self.cfg
+        
+        # Pyramiding check
+        if existing_positions >= cfg.pyramid_max:
+            return None, cash
 
+        # Add Slippage
+        slippage_factor = (1 + cfg.slippage_pct / 100.0) if direction == 1 else (1 - cfg.slippage_pct / 100.0)
+        fill_price = exec_price * slippage_factor
+        slippage_applied = abs(fill_price - exec_price)
+        
         qty = compute_quantity(
             cash             = cash,
-            entry_price      = exec_price,
+            entry_price      = fill_price,
             capital_risk_pct = cfg.capital_risk_pct,
             fixed_quantity   = cfg.fixed_quantity,
             stop_price       = stop_price,
             atr              = atr,
             atr_mult         = cfg.stop_loss_atr_mult,
+            lot_size         = cfg.lot_size,
         )
         if qty <= 0:
             return None, cash
 
         order_side = "BUY" if direction == 1 else "SELL"
-        chg = self.commission.calculate(cfg.segment, order_side, qty, exec_price)
-        total_cost = exec_price * qty + chg.total if direction == 1 else chg.total
-
-        if direction == 1 and cash < total_cost:
-            # Adjust for commission costs, which can make a quantity that
-            # fits price alone unaffordable after fees.
-            affordable = qty
-            while affordable > 0:
-                affordable -= 1
-                chg = self.commission.calculate(cfg.segment, order_side, affordable, exec_price)
-                total_cost = exec_price * affordable + chg.total
-                if cash >= total_cost:
-                    qty = affordable
-                    break
-            if affordable <= 0 or qty <= 0:
-                logger.debug(
-                    f"Insufficient cash after fees: need ₹{total_cost:.0f}, have ₹{cash:.0f}"
-                )
+        
+        if direction == 1:
+            qty = _max_affordable_qty(cash, fill_price, qty, self.commission, cfg.segment, order_side, cfg.lot_size)
+            if qty <= 0:
                 return None, cash
+                
+        chg = self.commission.calculate(order_side, qty, fill_price, cfg.segment)
+        total_cost = fill_price * qty + chg.total if direction == 1 else chg.total
 
         if cash < total_cost:
-            logger.debug(f"Insufficient cash: need ₹{total_cost:.0f}, have ₹{cash:.0f}")
             return None, cash
 
         new_cash = cash - total_cost
 
-        # Build trailing stop level if configured
-        trail_level = 0.0
-        if cfg.use_trailing_stop:
-            pct = cfg.trailing_stop_pct
-            amt = cfg.trailing_stop_amt
-            if pct > 0:
-                dist = exec_price * (pct / 100.0)
-            else:
-                dist = amt
-            trail_level = (exec_price - dist) if direction == 1 else (exec_price + dist)
+        actual_sl_spec = sl_spec or StopLossSpec()
+        actual_tp_spec = tp_spec or TakeProfitSpec()
+        
+        if actual_sl_spec.is_active() and stop_price is None:
+            stop_price = actual_sl_spec.compute_initial_stop(fill_price, direction, atr)
+            
+        target_price = None
+        if actual_tp_spec.is_active():
+            sl_dist = abs(fill_price - stop_price) if stop_price else None
+            target_price = actual_tp_spec.compute_target(fill_price, direction, sl_dist, atr)
 
         pos = Position(
             symbol              = symbol,
             entry_time          = bar_time,
-            entry_price         = exec_price,
+            entry_price         = fill_price,
             quantity            = qty,
             direction           = direction,
             entry_signal        = entry_signal,
             entry_charges       = chg.total,
             entry_bar_idx       = bar_idx,
             stop_price          = stop_price,
-            trailing_stop_pct   = cfg.trailing_stop_pct,
+            trailing_stop_pct   = cfg.trailing_stop_pct, 
             trailing_stop_amt   = cfg.trailing_stop_amt,
-            trailing_stop_level = trail_level,
+            trailing_stop_level = 0.0,
             order_type          = cfg.default_order_type,
+            pyramid_level       = existing_positions + 1,
+            slippage_applied    = slippage_applied * qty,
+            sl_spec             = actual_sl_spec,
+            tp_spec             = actual_tp_spec,
+            target_price        = target_price,
+            gtt_order           = gtt_order,
         )
-        logger.debug(
-            f"OPEN  {direction:+d} {symbol} qty={qty} @ ₹{exec_price:.2f} "
-            f"charges=₹{chg.total:.2f}  cash_remaining=₹{new_cash:.0f}"
-        )
+        
+        if cfg.use_trailing_stop:
+            pos.update_trailing_stop(fill_price, fill_price)
+
         return pos, new_cash
 
-    # ------------------------------------------------------------------
-    # Exit fill
-    # ------------------------------------------------------------------
+    def open_bracket_position(
+        self,
+        direction: int,
+        exec_price: float,
+        sl_spec: StopLossSpec,
+        tp_spec: TakeProfitSpec,
+        cash: float,
+        symbol: str,
+        bar_idx: int,
+        bar_time: pd.Timestamp,
+        entry_signal: str,
+        existing_positions: int = 0,
+        atr: Optional[float] = None,
+    ) -> Tuple[Optional[Position], float]:
+        return self.open_position(
+            direction=direction, exec_price=exec_price, cash=cash, symbol=symbol, 
+            bar_idx=bar_idx, bar_time=bar_time, entry_signal=entry_signal, 
+            existing_positions=existing_positions, atr=atr,
+            sl_spec=sl_spec, tp_spec=tp_spec
+        )
+
+    def open_cover_position(
+        self,
+        direction: int,
+        exec_price: float,
+        sl_spec: StopLossSpec,
+        cash: float,
+        symbol: str,
+        bar_idx: int,
+        bar_time: pd.Timestamp,
+        entry_signal: str,
+        existing_positions: int = 0,
+        atr: Optional[float] = None,
+    ) -> Tuple[Optional[Position], float]:
+        if not sl_spec.is_active():
+            raise ValueError("Cover position requires an active StopLossSpec")
+        return self.open_position(
+            direction=direction, exec_price=exec_price, cash=cash, symbol=symbol, 
+            bar_idx=bar_idx, bar_time=bar_time, entry_signal=entry_signal, 
+            existing_positions=existing_positions, atr=atr,
+            sl_spec=sl_spec
+        )
 
     def close_position(
         self,
@@ -207,29 +209,28 @@ class FillEngine:
         bar_idx:     int,
         exit_signal: str,
         portfolio_value_after: float,
-    ) -> Tuple[Trade, float]:
-        """
-        Simulate an exit fill, closing ``pos`` at ``exec_price``.
-
-        Returns
-        -------
-        (trade, new_cash)
-        """
+        partial_qty: Optional[int] = None,
+    ) -> Tuple[Trade, float, Optional[Position]]:
         cfg = self.cfg
         order_side = "SELL" if pos.direction == 1 else "BUY"
-        chg = self.commission.calculate(cfg.segment, order_side, pos.quantity, exec_price)
+        
+        slippage_factor = (1 - cfg.slippage_pct / 100.0) if pos.direction == 1 else (1 + cfg.slippage_pct / 100.0)
+        fill_price = exec_price * slippage_factor
+        
+        close_qty = partial_qty if partial_qty and partial_qty < pos.quantity else pos.quantity
+        chg = self.commission.calculate(order_side, close_qty, fill_price, cfg.segment)
 
-        gross_pnl = (exec_price - pos.entry_price) * pos.direction * pos.quantity
-        net_pnl   = gross_pnl - pos.entry_charges - chg.total
-        pnl_pct   = net_pnl / (pos.entry_price * pos.quantity) if pos.entry_price > 0 else 0.0
+        gross_pnl = (fill_price - pos.entry_price) * pos.direction * close_qty
+        
+        alloc_entry_charges = pos.entry_charges * (close_qty / pos.quantity)
+        net_pnl   = gross_pnl - alloc_entry_charges - chg.total
+        pnl_pct   = net_pnl / (pos.entry_price * close_qty) if pos.entry_price > 0 else 0.0
 
-        # Proceeds back to cash
-        if pos.direction == 1:   # long exit — receive proceeds, pay charges
-            new_cash = cash + exec_price * pos.quantity - chg.total
-        else:                    # short exit — return margin, receive short gain/loss
-            new_cash = cash + pos.entry_price * pos.quantity + gross_pnl - chg.total
+        if pos.direction == 1:
+            new_cash = cash + fill_price * close_qty - chg.total
+        else:
+            new_cash = cash + pos.entry_price * close_qty + gross_pnl - chg.total
 
-        # Duration
         try:
             delta: timedelta = bar_time - pos.entry_time
             total_s = int(delta.total_seconds())
@@ -244,19 +245,21 @@ class FillEngine:
         except Exception:
             duration_str = ""
 
+        is_partial = close_qty < pos.quantity
+
         trade = Trade(
             symbol               = pos.symbol,
             entry_time           = pos.entry_time,
             exit_time            = bar_time,
             entry_price          = pos.entry_price,
-            exit_price           = exec_price,
-            quantity             = pos.quantity,
+            exit_price           = fill_price,
+            quantity             = close_qty,
             direction            = pos.direction,
             direction_label      = pos.direction_label,
             gross_pnl            = round(gross_pnl, 2),
-            entry_charges        = round(pos.entry_charges, 2),
+            entry_charges        = round(alloc_entry_charges, 2),
             exit_charges         = round(chg.total, 2),
-            total_charges        = round(pos.entry_charges + chg.total, 2),
+            total_charges        = round(alloc_entry_charges + chg.total, 2),
             net_pnl              = round(net_pnl, 2),
             pnl_pct              = round(pnl_pct, 6),
             entry_signal         = pos.entry_signal,
@@ -266,92 +269,98 @@ class FillEngine:
             mae                  = round(pos.mae, 4),
             mfe                  = round(pos.mfe, 4),
             cumulative_portfolio = round(portfolio_value_after, 2),
+            pyramid_level        = pos.pyramid_level,
+            slippage             = abs(fill_price - exec_price) * close_qty,
+            sl_type              = pos.sl_spec.sl_type.value if pos.sl_spec else "",
+            tp_type              = pos.tp_spec.tp_type.value if pos.tp_spec else "",
+            exit_reason          = exit_signal,
+            partial              = is_partial
         )
-        logger.debug(
-            f"CLOSE {pos.direction:+d} {pos.symbol} @ ₹{exec_price:.2f} "
-            f"net_pnl=₹{net_pnl:.2f}  [{exit_signal}]"
-        )
-        return trade, new_cash
 
-    # ------------------------------------------------------------------
-    # Stop-loss and trailing-stop checks
-    # ------------------------------------------------------------------
+        if is_partial:
+            pos.quantity -= close_qty
+            pos.entry_charges -= alloc_entry_charges
+            pos.partial_exit_done = True
+            return trade, new_cash, pos
+        else:
+            return trade, new_cash, None
 
-    def check_stops(
+    def check_exits(
         self,
         positions: List[Position],
         cash:      float,
         open_p:    float,
         high:      float,
         low:       float,
-        bar_time:  pd.Timestamp,
+        ct:        pd.Timestamp,
         bar_idx:   int,
         symbol:    str,
         portfolio_value: float,
+        atr:       Optional[float] = None,
+        high_series: Optional[np.ndarray] = None,
+        low_series:  Optional[np.ndarray] = None,
     ) -> Tuple[List[Position], List[Trade], float]:
-        """
-        Check all open positions for stop-loss and trailing-stop triggers.
-
-        Evaluates **trailing stop first**, then **fixed stop** (trailing stop
-        takes precedence because it is dynamic and may be tighter).
-
-        Parameters
-        ----------
-        positions : list[Position]
-            All currently open positions for this symbol.
-        cash : float
-            Current cash before any stops fire.
-        open_p, high, low : float
-            Current bar OHLCV values.
-        bar_time : pd.Timestamp
-        bar_idx : int
-        symbol : str
-        portfolio_value : float
-            Total portfolio value at this bar (used for cumulative_portfolio).
-
-        Returns
-        -------
-        (remaining_positions, new_trades, new_cash)
-        """
         remaining: List[Position] = []
         new_trades: List[Trade]   = []
 
         for pos in positions:
-            # Update excursion metrics every bar
             mid = (high + low) / 2.0
             pos.update_excursion(mid)
+            
+            period_high, period_low = high, low
+            if pos.sl_spec and pos.sl_spec.is_trailing() and hasattr(pos, 'update_chandelier_stop'):
+                if high_series is not None and low_series is not None:
+                    pos.update_chandelier_stop(high_series, low_series, atr, bar_idx)
+            
+            pos.update_trailing_stop(high, low, atr, period_high)
 
-            # Update trailing stop level
-            pos.update_trailing_stop(high, low)
-
-            fired    = False
+            fired = False
             fill_price = 0.0
-            reason   = ""
+            reason = ""
+            partial_qty = None
 
-            # 1. Trailing stop (checked first — may be tighter than fixed)
-            triggered, fp = pos.is_trailing_stop_triggered(open_p, low, high)
-            if triggered:
-                fired = True; fill_price = fp; reason = "Trailing Stop"
-
-            # 2. Fixed stop-loss (only if trailing stop did not fire)
             if not fired:
                 triggered, fp = pos.is_fixed_stop_triggered(open_p, low, high)
                 if triggered:
-                    fired = True; fill_price = fp; reason = "Stop Loss"
+                    fired, fill_price, reason = True, fp, "SL"
+
+            if not fired:
+                triggered, fp = pos.is_trailing_stop_triggered(open_p, low, high)
+                if triggered:
+                    fired, fill_price, reason = True, fp, "TRAILING_SL"
+
+            if not fired:
+                if pos.is_time_exit_due(bar_idx):
+                    fired, fill_price, reason = True, open_p, "TIME"
+
+            if not fired:
+                triggered, fp = pos.is_target_triggered(open_p, low, high)
+                if triggered:
+                    if pos.tp_spec and pos.tp_spec.tp_type.is_partial() and not pos.partial_exit_done:
+                        fired = True
+                        fill_price = fp
+                        reason = "PARTIAL_TARGET"
+                        partial_qty = int(pos.quantity * (pos.tp_spec.partial_pct / 100.0))
+                        partial_qty = (partial_qty // self.cfg.lot_size) * self.cfg.lot_size
+                        if partial_qty == 0:
+                            partial_qty = self.cfg.lot_size 
+                            if partial_qty >= pos.quantity:
+                                partial_qty = pos.quantity
+                                reason = "TARGET"
+                    else:
+                        fired, fill_price, reason = True, fp, "TARGET"
 
             if fired:
-                trade, cash = self.close_position(
-                    pos, fill_price, cash, bar_time, bar_idx, reason, portfolio_value
+                trade, cash, updated_pos = self.close_position(
+                    pos, fill_price, cash, ct, bar_idx, reason, portfolio_value, partial_qty
                 )
                 new_trades.append(trade)
+                if updated_pos:
+                    remaining.append(updated_pos)
             else:
                 remaining.append(pos)
 
         return remaining, new_trades, cash
-
-    # ------------------------------------------------------------------
-    # Pending limit / stop entry orders
-    # ------------------------------------------------------------------
 
     def check_pending_entries(
         self,
@@ -364,70 +373,124 @@ class FillEngine:
         bar_idx:   int,
         symbol:    str,
         atr:       Optional[float],
+        existing_positions: int,
     ) -> Tuple[List[PendingOrder], List[Position], float]:
-        """
-        Iterate pending entry orders and fill any that are triggered.
-
-        Expired orders (``expires_after`` exceeded) are silently dropped.
-
-        Returns
-        -------
-        (remaining_pending, new_positions, new_cash)
-        """
         remaining_pending: List[PendingOrder] = []
         new_positions:     List[Position]     = []
 
         for order in pending:
-            # Expiry check
             if order.expires_after > 0 and (bar_idx - order.signal_bar) > order.expires_after:
-                logger.debug(f"Pending {order.order_type.value} order expired at bar {bar_idx}")
                 continue
 
             filled = False
             fill_price = 0.0
             stop_already_triggered = getattr(order, "_stop_triggered", False)
 
-            if order.order_type == OrderType.LIMIT:
-                filled, fill_price = check_limit_fill(
-                    order.direction, order.limit_price, open_p, low, high
-                )
-
+            if order.order_type == OrderType.AMO:
+                filled, fill_price = check_amo_fill(bar_idx, order.signal_bar, open_p)
+            elif order.order_type == OrderType.LIMIT:
+                filled, fill_price = check_limit_fill(order.direction, order.limit_price, open_p, low, high)
             elif order.order_type == OrderType.STOP:
-                filled, fill_price = check_stop_fill(
-                    order.direction, order.stop_price, open_p, low, high
-                )
-
+                filled, fill_price = check_stop_fill(order.direction, order.stop_price, open_p, low, high)
             elif order.order_type == OrderType.STOP_LIMIT:
                 filled, fill_price, hit = check_stop_limit_fill(
                     order.direction, order.stop_price, order.limit_price,
                     open_p, low, high, stop_already_triggered
                 )
-                order._stop_triggered = hit  # type: ignore[attr-defined]
+                order._stop_triggered = hit
+            elif order.order_type == OrderType.BRACKET:
+                filled, fill_price = check_limit_fill(order.direction, order.limit_price, open_p, low, high)
+            elif order.order_type == OrderType.COVER:
+                filled, fill_price = check_limit_fill(order.direction, order.limit_price, open_p, low, high)
 
             if filled:
-                # Compute stop price for the new position
-                stop_for_pos: Optional[float] = None
-                if self.cfg.stop_loss_pct > 0:
-                    dist = fill_price * (self.cfg.stop_loss_pct / 100.0)
-                    stop_for_pos = fill_price - dist if order.direction == 1 else fill_price + dist
-                elif atr and self.cfg.stop_loss_atr_mult > 0:
-                    dist = atr * self.cfg.stop_loss_atr_mult
-                    stop_for_pos = fill_price - dist if order.direction == 1 else fill_price + dist
-
-                pos, cash = self.open_position(
-                    direction    = order.direction,
-                    exec_price   = fill_price,
-                    cash         = cash,
-                    symbol       = symbol,
-                    bar_idx      = bar_idx,
-                    bar_time     = bar_time,
-                    entry_signal = f"{order.order_type.value} Fill",
-                    atr          = atr,
-                    stop_price   = stop_for_pos,
-                )
+                if order.order_type == OrderType.BRACKET:
+                    pos, cash = self.open_bracket_position(
+                        order.direction, fill_price, order.sl_spec, order.tp_spec,
+                        cash, symbol, bar_idx, bar_time, f"{order.order_type.value} Fill",
+                        existing_positions + len(new_positions), atr
+                    )
+                elif order.order_type == OrderType.COVER:
+                    pos, cash = self.open_cover_position(
+                        order.direction, fill_price, order.sl_spec,
+                        cash, symbol, bar_idx, bar_time, f"{order.order_type.value} Fill",
+                        existing_positions + len(new_positions), atr
+                    )
+                else:
+                    pos, cash = self.open_position(
+                        direction    = order.direction,
+                        exec_price   = fill_price,
+                        cash         = cash,
+                        symbol       = symbol,
+                        bar_idx      = bar_idx,
+                        bar_time     = bar_time,
+                        entry_signal = f"{order.order_type.value} Fill",
+                        existing_positions = existing_positions + len(new_positions),
+                        atr          = atr,
+                        sl_spec      = order.sl_spec,
+                        tp_spec      = order.tp_spec,
+                    )
+                    
                 if pos:
                     new_positions.append(pos)
             else:
                 remaining_pending.append(order)
 
         return remaining_pending, new_positions, cash
+
+    def check_gtt_orders(
+        self,
+        gtt_orders: List[GTTOrder],
+        cash:       float,
+        open_p:     float,
+        high:       float,
+        low:        float,
+        bar_time:   pd.Timestamp,
+        bar_idx:    int,
+        symbol:     str,
+        atr:        Optional[float],
+        existing_positions: int,
+    ) -> Tuple[List[GTTOrder], List[Position], float]:
+        remaining: List[GTTOrder] = []
+        new_positions: List[Position] = []
+
+        for order in gtt_orders:
+            if order.expiry_bars > 0 and (bar_idx - order.signal_bar) > order.expiry_bars:
+                continue
+                
+            filled = False
+            fill_price = 0.0
+
+            if not order.triggered:
+                if order.direction == 1:
+                    if open_p >= order.trigger_price: order.triggered = True
+                    elif high >= order.trigger_price: order.triggered = True
+                else:
+                    if open_p <= order.trigger_price: order.triggered = True
+                    elif low <= order.trigger_price: order.triggered = True
+
+            if order.triggered:
+                if order.limit_price:
+                    limit_filled, limit_fp = check_limit_fill(order.direction, order.limit_price, open_p, low, high)
+                    if limit_filled:
+                        filled, fill_price = True, limit_fp
+                else:
+                    if order.direction == 1:
+                        fill_price = max(open_p, order.trigger_price)
+                    else:
+                        fill_price = min(open_p, order.trigger_price)
+                    filled = True
+
+            if filled:
+                pos, cash = self.open_bracket_position(
+                    order.direction, fill_price, order.sl_spec, order.tp_spec,
+                    cash, symbol, bar_idx, bar_time, "GTT Fill",
+                    existing_positions + len(new_positions), atr
+                )
+                if pos:
+                    pos.gtt_order = order
+                    new_positions.append(pos)
+            else:
+                remaining.append(order)
+
+        return remaining, new_positions, cash

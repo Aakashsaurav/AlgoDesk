@@ -2,59 +2,20 @@
 backtester/event_loop.py
 -------------------------
 The core bar-by-bar simulation loop.
-
-This module has exactly ONE responsibility: iterate over ``signals_df``
-one bar at a time and coordinate the fill engine and portfolio tracker.
-All order-fill math lives in :mod:`fill_engine`.  All sizing math lives
-in :mod:`position_sizer`.  All data structures live in :mod:`models`.
-
-EXECUTION ORDER PER BAR
-========================
-On each bar ``i``:
-
-1. **Update trailing-stop levels** and **check stop triggers** (trailing
-   and fixed) via :meth:`FillEngine.check_stops`.
-2. **Check pending limit / stop / stop-limit entry orders**.
-3. **Intraday squareoff** (if enabled and time >= 15:20 IST).
-4. **Process signal from the previous bar** — entries and exits execute
-   at the *current* bar's open (next-bar execution model, no look-ahead).
-5. **Record equity and drawdown** at this bar using NumPy arrays
-   (converted to pd.Series only at the end — zero Pandas overhead per bar).
-6. **Max drawdown guard** — halt if equity fell below the configured
-   threshold, closing all positions immediately.
-
-NO LOOK-AHEAD BIAS
-==================
-Signals are generated on bar ``i`` but executed on bar ``i+1``'s open.
-The loop acts on ``signals[i-1]`` during bar ``i`` — strategies cannot
-use bar ``i``'s OHLCV to fill at bar ``i``'s prices.
-
-P0 FIX (2026-04-11)
-===================
-The end-of-data position close block was incorrectly indented one level
-too deep — it sat *inside* the ``for i in range(n)`` loop rather than
-after it. This caused it to run on every bar (using ``closes[-1]``, the
-final-bar price, for all intermediate bars) and generated phantom "End
-of Data" trades throughout the backtest. The block is now correctly
-placed *outside* the loop so it fires exactly once after all bars have
-been processed.
-
-The unused ``position_sl`` dict (declared but never written or read) has
-also been removed.
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import time as dtime
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, Dict
 
 import numpy as np
 import pandas as pd
 
-from backtester.models import BacktestConfig, Position, Trade, OrderType
+from backtester.models import BacktestConfig, Position, Trade
+from backtester.orders import OrderType, PendingOrder, GTTOrder
 from backtester.fill_engine import FillEngine
-from backtester.order_types import PendingOrder
 from backtester.position_sizer import compute_quantity
 from risk.engine import RiskEngine
 
@@ -62,70 +23,50 @@ logger = logging.getLogger(__name__)
 
 _SQUAREOFF_TIME = dtime(15, 20)
 
-
-# ---------------------------------------------------------------------------
-# Public entry point
-# ---------------------------------------------------------------------------
-
 def run_event_loop(
     signals_df: pd.DataFrame,
     config:     BacktestConfig,
     symbol:     str,
     strategy:   Optional[Any] = None,
+    gtt_orders: Optional[List[GTTOrder]] = None,
 ) -> Tuple[List[Trade], pd.Series, pd.Series]:
-    """
-    Run the bar-by-bar backtest simulation for one symbol.
-
-    Parameters
-    ----------
-    signals_df : pd.DataFrame
-        OHLCV data with a ``signal`` column appended by the strategy.
-        Required columns: ``open``, ``high``, ``low``, ``close``, ``signal``.
-    config : BacktestConfig
-    symbol : str
-    strategy : BaseStrategy, optional
-        If provided, the engine calls strategy lifecycle hooks:
-          - ``on_entry_stop()``  — per-trade stop-loss price
-          - ``on_bar_close()``   — per-bar trailing stop update
-          - ``on_size()``        — custom position sizing
-
-    Returns
-    -------
-    trade_log : list[Trade]
-    equity_curve : pd.Series  (same index as signals_df)
-    drawdown : pd.Series      (fractional, <= 0)
-    """
     cfg    = config
     filler = FillEngine(cfg)
     risk_engine = RiskEngine(cfg.risk_config)
     risk_engine.record_equity(cfg.initial_capital)
 
-    # Extract NumPy arrays — avoids per-bar DataFrame attribute lookup
     closes  = signals_df["close"].values.astype(float)
     highs   = signals_df["high"].values.astype(float)
     lows    = signals_df["low"].values.astype(float)
     opens   = signals_df["open"].values.astype(float)
-    signals = signals_df["signal"].fillna(0).astype(int).values
+    signals = signals_df["signal"].fillna(0).astype(int).values if "signal" in signals_df.columns else np.zeros(len(signals_df), dtype=int)
+    
+    if "signal_tag" in signals_df.columns:
+        signal_tags = signals_df["signal_tag"].fillna("").astype(str).values
+    else:
+        signal_tags = np.full(len(signals_df), "", dtype=object)
+
+    if "gtt_orders" in signals_df.columns:
+        gtt_col = signals_df["gtt_orders"].values
+    else:
+        gtt_col = np.full(len(signals_df), None, dtype=object)
+
     times   = signals_df.index
     n       = len(signals_df)
 
-    # Pre-compute ATR(14) once — used by position sizer each bar
     atr_vals = _compute_atr14(closes, highs, lows, n)
 
-    # Mutable state
     cash:      float                = cfg.initial_capital
     positions: List[Position]       = []
     pending:   List[PendingOrder]   = []
+    gtt_state: List[GTTOrder]       = list(gtt_orders) if gtt_orders else []
     trade_log: List[Trade]          = []
     halted:    bool                 = False
 
-    # Pre-allocated output arrays (NumPy write-by-index is ~100x faster than
-    # pd.Series.iloc assignment inside a loop)
     equity_arr   = np.full(n, np.nan, dtype=float)
     drawdown_arr = np.full(n, np.nan, dtype=float)
     peak_equity  = cfg.initial_capital
 
-    # ── Main event loop ────────────────────────────────────────────────────
     for i in range(n):
         op = opens[i];  hp = highs[i];  lp = lows[i];  cp = closes[i]
         ct = times[i]
@@ -135,7 +76,6 @@ def run_event_loop(
             else None
         )
 
-        # Skip bars with invalid open (corporate action gaps, bad data)
         if np.isnan(op) or op <= 0:
             equity_arr[i] = cash
             continue
@@ -144,52 +84,57 @@ def run_event_loop(
             equity_arr[i] = cash
             continue
 
-        # Step 1: trailing + fixed stop checks
         port_val = _pv(cash, positions, cp)
-        positions, fired, cash = filler.check_stops(
-            positions, cash, op, hp, lp, ct, i, symbol, port_val
+        
+        positions, fired, cash = filler.check_exits(
+            positions, cash, op, hp, lp, ct, i, symbol, port_val, atr_i,
+            high_series=highs[:i+1], low_series=lows[:i+1]
         )
         trade_log.extend(fired)
 
-        # Step 2: pending entry orders
+        if gtt_col[i]:
+            gtt_state.extend(gtt_col[i])
+            
+        gtt_state, new_pos_gtt, cash = filler.check_gtt_orders(
+            gtt_state, cash, op, hp, lp, ct, i, symbol, atr_i, len(positions)
+        )
+        positions.extend(new_pos_gtt)
+
         pending, new_pos, cash = filler.check_pending_entries(
-            pending, cash, op, hp, lp, ct, i, symbol, atr_i
+            pending, cash, op, hp, lp, ct, i, symbol, atr_i, len(positions)
         )
         positions.extend(new_pos)
 
-        # Step 3: intraday squareoff
         if cfg.intraday_squareoff and _past_squareoff(ct):
             cash, positions, trade_log = _close_all(
                 positions, cash, op, ct, i, filler, trade_log,
                 "Intraday Squareoff", risk_engine=risk_engine,
             )
 
-        # Step 3b: Hook — on_bar_close (trailing stop update per open position)
-        # Called for every open position so strategies can implement custom
-        # trailing stop logic (e.g. ORB's |prev_body|/5) without a custom loop.
         if strategy is not None and positions and i > 0 and hasattr(strategy, "on_bar_close"):
-            row_i = signals_df.iloc[i]
             for pos in positions:
                 old_sl = pos.stop_price if pos.stop_price is not None else float("nan")
-                # Only invoke hook if position has a stop price (avoids NaN handling)
                 if not _isnan(old_sl):
                     new_sl = strategy.on_bar_close(
                         bar_idx    = i,
-                        row        = row_i,
+                        open_p     = op,
+                        high_p     = hp,
+                        low_p      = lp,
+                        close_p    = cp,
+                        tag        = signal_tags[i],
                         direction  = pos.direction,
                         current_sl = old_sl,
                     )
-                    # Hook must only move the stop in the favourable direction
                     if pos.direction == 1:
                         pos.stop_price = max(old_sl, new_sl) if new_sl > old_sl else old_sl
                     else:
                         pos.stop_price = min(old_sl, new_sl) if new_sl < old_sl else old_sl
 
-        # Step 4: signal from PREVIOUS bar (next-bar execution — no look-ahead)
         if i > 0 and signals[i - 1] != 0:
             if not risk_engine.can_open(len(positions), signals[i - 1]):
                 logger.debug("RiskEngine blocked new trade at bar %s", i)
             else:
+                tag = signal_tags[i-1] or "Market Signal"
                 cash, positions, pending, trade_log = _handle_signal(
                     signal=int(signals[i - 1]),
                     exec_price=op, prev_close=closes[i - 1],
@@ -197,18 +142,17 @@ def run_event_loop(
                     positions=positions, pending=pending,
                     trade_log=trade_log, filler=filler, cfg=cfg, symbol=symbol,
                     strategy=strategy,
-                    signal_row=signals_df.iloc[i - 1],
+                    signal_row=signals_df.iloc[i - 1] if strategy else None,
                     risk_engine=risk_engine,
+                    tag=tag
                 )
 
-        # Step 5: record equity and drawdown
         equity = _pv(cash, positions, cp)
         equity_arr[i] = equity
         if equity > peak_equity:
             peak_equity = equity
         drawdown_arr[i] = (equity - peak_equity) / peak_equity if peak_equity > 0 else 0.0
 
-        # Step 6: max drawdown halt
         if peak_equity > 0 and (equity / peak_equity - 1.0) < -cfg.max_drawdown_pct:
             logger.warning(f"[{symbol}] Max drawdown limit breached at bar {i}. Halting.")
             cash, positions, trade_log = _close_all(
@@ -217,20 +161,12 @@ def run_event_loop(
             )
             halted = True
 
-    # ── Force-close any surviving positions at end of data ─────────────────
-    # P0 FIX: this block was previously indented one level too deep (inside
-    # the for-loop above). It now correctly sits outside the loop and fires
-    # exactly once after all bars have been processed.
-    #
-    # A surviving position here means the strategy emitted a sell/cover
-    # signal on the very last bar — that signal would have executed at the
-    # NEXT bar's open, which does not exist. We close it at the last close.
     if positions:
         lp_ = closes[-1]
         lt_ = times[-1]
         pv_ = _pv(cash, positions, lp_)
         for pos in list(positions):
-            trade, cash = filler.close_position(
+            trade, cash, _ = filler.close_position(
                 pos, lp_, cash, lt_, n - 1, "End of Data", pv_
             )
             trade_log.append(trade)
@@ -248,9 +184,187 @@ def run_event_loop(
     return trade_log, eq_series, dd_series
 
 
-# ---------------------------------------------------------------------------
-# Signal processing helper
-# ---------------------------------------------------------------------------
+def _merge_symbol_bars(symbol_signals: Dict[str, pd.DataFrame]) -> List[Tuple[pd.Timestamp, str, dict]]:
+    events = []
+    for symbol, df in symbol_signals.items():
+        times = df.index
+        opens = df["open"].values.astype(float)
+        highs = df["high"].values.astype(float)
+        lows = df["low"].values.astype(float)
+        closes = df["close"].values.astype(float)
+        signals = df["signal"].fillna(0).astype(int).values if "signal" in df.columns else np.zeros(len(df), dtype=int)
+        tags = df["signal_tag"].fillna("").astype(str).values if "signal_tag" in df.columns else np.full(len(df), "", dtype=object)
+        gtts = df["gtt_orders"].values if "gtt_orders" in df.columns else np.full(len(df), None, dtype=object)
+        
+        n = len(df)
+        atr_vals = _compute_atr14(closes, highs, lows, n)
+        
+        for i in range(n):
+            events.append((
+                times[i], 
+                symbol, 
+                {
+                    "i": i,
+                    "open": opens[i],
+                    "high": highs[i],
+                    "low": lows[i],
+                    "close": closes[i],
+                    "signal": signals[i],
+                    "prev_signal": signals[i-1] if i > 0 else 0,
+                    "prev_tag": tags[i-1] if i > 0 else "",
+                    "prev_close": closes[i-1] if i > 0 else 0.0,
+                    "prev_row": df.iloc[i-1] if i > 0 else None,
+                    "tag": tags[i],
+                    "gtt": gtts[i],
+                    "atr": float(atr_vals[i]) if (atr_vals is not None and not np.isnan(atr_vals[i])) else None,
+                    "high_series": highs[:i+1],
+                    "low_series": lows[:i+1]
+                }
+            ))
+            
+    events.sort(key=lambda x: x[0])
+    return events
+
+
+def run_event_loop_portfolio(
+    symbol_signals: Dict[str, pd.DataFrame],
+    config: BacktestConfig,
+    strategy_name: str = "",
+) -> Tuple[List[Trade], Dict[str, pd.Series], pd.Series, pd.Series]:
+    cfg = config
+    filler = FillEngine(cfg)
+    risk_engine = RiskEngine(cfg.risk_config)
+    risk_engine.record_equity(cfg.initial_capital)
+
+    cash = cfg.initial_capital
+    positions_by_symbol: Dict[str, List[Position]] = {sym: [] for sym in symbol_signals}
+    pending_by_symbol: Dict[str, List[PendingOrder]] = {sym: [] for sym in symbol_signals}
+    gtt_by_symbol: Dict[str, List[GTTOrder]] = {sym: [] for sym in symbol_signals}
+    trade_log: List[Trade] = []
+    
+    events = _merge_symbol_bars(symbol_signals)
+    
+    unique_times = sorted(list(set([e[0] for e in events])))
+    combined_eq_dict = {t: np.nan for t in unique_times}
+    per_sym_eq_dict = {sym: {t: np.nan for t in unique_times} for sym in symbol_signals}
+    
+    last_close = {sym: 0.0 for sym in symbol_signals}
+    
+    peak_equity = cfg.initial_capital
+    halted = False
+    
+    for ts, sym, data in events:
+        if halted:
+            break
+            
+        op, hp, lp, cp = data["open"], data["high"], data["low"], data["close"]
+        idx = data["i"]
+        atr_i = data["atr"]
+        
+        last_close[sym] = cp
+        
+        if np.isnan(op) or op <= 0:
+            continue
+            
+        pos_list = positions_by_symbol[sym]
+        pend_list = pending_by_symbol[sym]
+        gtt_list = gtt_by_symbol[sym]
+        
+        port_val = _pv_portfolio(cash, positions_by_symbol, last_close)
+        
+        pos_list, fired, cash = filler.check_exits(
+            pos_list, cash, op, hp, lp, ts, idx, sym, port_val, atr_i,
+            high_series=data["high_series"], low_series=data["low_series"]
+        )
+        trade_log.extend(fired)
+        
+        if data["gtt"]:
+            gtt_list.extend(data["gtt"])
+            
+        gtt_list, new_pos_gtt, cash = filler.check_gtt_orders(
+            gtt_list, cash, op, hp, lp, ts, idx, sym, atr_i, len(pos_list)
+        )
+        pos_list.extend(new_pos_gtt)
+        
+        pend_list, new_pos, cash = filler.check_pending_entries(
+            pend_list, cash, op, hp, lp, ts, idx, sym, atr_i, len(pos_list)
+        )
+        pos_list.extend(new_pos)
+        
+        if cfg.intraday_squareoff and _past_squareoff(ts):
+            cash, pos_list, trade_log = _close_all(
+                pos_list, cash, op, ts, idx, filler, trade_log,
+                "Intraday Squareoff", risk_engine
+            )
+            
+        prev_signal = data["prev_signal"]
+        if prev_signal != 0:
+            if not risk_engine.can_open(len(pos_list), prev_signal):
+                logger.debug("Risk blocked %s", sym)
+            else:
+                tag = data["prev_tag"] or "Market Signal"
+                cash, pos_list, pend_list, trade_log = _handle_signal(
+                    signal=int(prev_signal), exec_price=op, prev_close=data["prev_close"],
+                    bar_time=ts, bar_idx=idx, cash=cash, atr=atr_i,
+                    positions=pos_list, pending=pend_list, trade_log=trade_log,
+                    filler=filler, cfg=cfg, symbol=sym,
+                    strategy=None, signal_row=data["prev_row"],
+                    risk_engine=risk_engine, tag=tag
+                )
+                
+        positions_by_symbol[sym] = pos_list
+        pending_by_symbol[sym] = pend_list
+        gtt_by_symbol[sym] = gtt_list
+        
+        eq = _pv_portfolio(cash, positions_by_symbol, last_close)
+        combined_eq_dict[ts] = eq
+        
+        per_sym_eq_dict[sym][ts] = _allocate_cash_share(cash, positions_by_symbol, sym, last_close)
+        
+        if eq > peak_equity: peak_equity = eq
+        
+        if peak_equity > 0 and (eq / peak_equity - 1.0) < -cfg.max_drawdown_pct:
+            logger.warning(f"Portfolio max drawdown breached.")
+            for s, p_list in positions_by_symbol.items():
+                cash, p_list, trade_log = _close_all(
+                    p_list, cash, last_close[s], ts, idx, filler, trade_log,
+                    "Max Drawdown Halt", risk_engine
+                )
+                positions_by_symbol[s] = p_list
+            halted = True
+            
+    # Force close
+    for sym, p_list in positions_by_symbol.items():
+        if p_list:
+            lp_ = last_close[sym]
+            pv_ = _pv_portfolio(cash, positions_by_symbol, last_close)
+            for pos in list(p_list):
+                trade, cash, _ = filler.close_position(
+                    pos, lp_, cash, ts, 0, "End of Data", pv_
+                )
+                trade_log.append(trade)
+                risk_engine.record_trade(trade.net_pnl)
+                
+    combined_eq_series = pd.Series(combined_eq_dict).ffill()
+    combined_dd_series = (combined_eq_series - combined_eq_series.cummax()) / combined_eq_series.cummax()
+    
+    per_sym_eq_series = {}
+    for sym in symbol_signals:
+        s = pd.Series(per_sym_eq_dict[sym]).ffill()
+        per_sym_eq_series[sym] = s
+        
+    return trade_log, per_sym_eq_series, combined_eq_series, combined_dd_series
+
+def _pv_portfolio(cash: float, positions_by_symbol: Dict[str, List[Position]], last_close: Dict[str, float]) -> float:
+    total_pos_value = sum(
+        sum(p.direction * p.quantity * last_close[sym] for p in pos_list)
+        for sym, pos_list in positions_by_symbol.items()
+    )
+    return cash + total_pos_value
+
+def _allocate_cash_share(cash: float, positions_by_symbol: Dict[str, List[Position]], target_symbol: str, last_close: Dict[str, float]) -> float:
+    sym_pos_val = sum(p.direction * p.quantity * last_close[target_symbol] for p in positions_by_symbol[target_symbol])
+    return (cash / max(1, len(positions_by_symbol))) + sym_pos_val
 
 def _handle_signal(
     signal:     int,
@@ -269,17 +383,10 @@ def _handle_signal(
     strategy:   Optional[Any] = None,
     signal_row: Optional[Any] = None,
     risk_engine: Optional[RiskEngine] = None,
+    tag:        str = "Market Signal",
 ) -> Tuple[float, List[Position], List[PendingOrder], List[Trade]]:
-    """
-    Translate a strategy signal into order actions.
-
-    When ``strategy`` is provided, calls lifecycle hooks:
-      - ``on_entry_stop()`` to get a per-trade stop-loss price
-      - ``on_size()``       to get a custom position quantity
-    """
     ot = cfg.default_order_type
 
-    # Close opposing positions
     remaining: List[Position] = []
     port_val = _pv(cash, positions, exec_price)
     for pos in positions:
@@ -288,7 +395,7 @@ def _handle_signal(
             (signal == -1 and pos.direction ==  1)
         )
         if should_close:
-            trade, cash = filler.close_position(
+            trade, cash, _ = filler.close_position(
                 pos, exec_price, cash, bar_time, bar_idx, "Signal Exit", port_val
             )
             trade_log.append(trade)
@@ -298,14 +405,11 @@ def _handle_signal(
             remaining.append(pos)
     positions = remaining
 
-    # Guards
     if cfg.max_positions > 0 and len(positions) >= cfg.max_positions:
         return cash, positions, pending, trade_log
     if signal == -1 and not cfg.allow_shorting:
         return cash, positions, pending, trade_log
 
-    # ── Hook: on_entry_stop — per-trade stop-loss price ───────────────────
-    # Strategy hook takes precedence over config's stop_loss_pct
     stop_price: Optional[float] = None
     if strategy is not None and signal_row is not None and hasattr(strategy, "on_entry_stop"):
         hook_sl = strategy.on_entry_stop(
@@ -316,11 +420,9 @@ def _handle_signal(
         if hook_sl is not None:
             stop_price = float(hook_sl)
 
-    # Fallback: use config-level stop if hook returned None
     if stop_price is None:
         stop_price = _entry_stop(signal, exec_price, atr, cfg)
 
-    # ── Hook: on_size — custom position quantity ─────────────────────────
     custom_qty: Optional[int] = None
     if strategy is not None and signal_row is not None and hasattr(strategy, "on_size"):
         custom_qty = strategy.on_size(
@@ -330,14 +432,11 @@ def _handle_signal(
             row     = signal_row,
         )
 
-    # Route by order type
     if ot == OrderType.MARKET:
         if custom_qty is not None and custom_qty > 0:
-            # Custom sizing: build position directly, bypass FillEngine sizing
-            from broker.upstox.commission import CommissionModel
             order_side = "BUY" if signal == 1 else "SELL"
-            chg        = cfg.commission_model.calculate(
-                cfg.segment, order_side, custom_qty, exec_price
+            chg        = filler.commission.calculate(
+                order_side, custom_qty, exec_price, cfg.segment
             )
             total_cost = (exec_price * custom_qty + chg.total) if signal == 1 else chg.total
             if total_cost <= cash:
@@ -348,7 +447,7 @@ def _handle_signal(
                     entry_price   = exec_price,
                     quantity      = custom_qty,
                     direction     = signal,
-                    entry_signal  = "Market Signal",
+                    entry_signal  = tag,
                     entry_charges = chg.total,
                     entry_bar_idx = bar_idx,
                     stop_price    = stop_price,
@@ -360,7 +459,7 @@ def _handle_signal(
             pos, cash = filler.open_position(
                 direction=signal, exec_price=exec_price, cash=cash,
                 symbol=symbol, bar_idx=bar_idx, bar_time=bar_time,
-                entry_signal="Market Signal", atr=atr, stop_price=stop_price,
+                entry_signal=tag, atr=atr, stop_price=stop_price,
             )
             if pos:
                 positions.append(pos)
@@ -369,7 +468,7 @@ def _handle_signal(
         pct = cfg.limit_offset_pct / 100.0
         qty = compute_quantity(
             cash, exec_price, cfg.capital_risk_pct,
-            cfg.fixed_quantity, stop_price, atr, cfg.stop_loss_atr_mult,
+            cfg.fixed_quantity, stop_price, atr, cfg.stop_loss_atr_mult, cfg.lot_size
         )
         if qty > 0:
             if ot == OrderType.LIMIT:
@@ -397,15 +496,8 @@ def _handle_signal(
 
     return cash, positions, pending, trade_log
 
-
-# ---------------------------------------------------------------------------
-# Micro-helpers (keep hot-path readable)
-# ---------------------------------------------------------------------------
-
 def _pv(cash: float, positions: List[Position], price: float) -> float:
-    """Portfolio value = cash + current market value of open positions."""
     return cash + sum(p.direction * p.quantity * price for p in positions)
-
 
 def _close_all(
     positions:  List[Position],
@@ -418,10 +510,9 @@ def _close_all(
     reason:     str,
     risk_engine: Optional[RiskEngine] = None,
 ) -> Tuple[float, List[Position], List[Trade]]:
-    """Close every open position at ``fill_price``."""
     port_val = _pv(cash, positions, fill_price)
     for pos in list(positions):
-        trade, cash = filler.close_position(
+        trade, cash, _ = filler.close_position(
             pos, fill_price, cash, bar_time, bar_idx, reason, port_val
         )
         trade_log.append(trade)
@@ -429,18 +520,15 @@ def _close_all(
             risk_engine.record_trade(trade.net_pnl)
     return cash, [], trade_log
 
-
 def _past_squareoff(bar_time) -> bool:
     try:
         return bar_time.time() >= _SQUAREOFF_TIME
     except AttributeError:
         return False
 
-
 def _entry_stop(
     direction: int, price: float, atr: Optional[float], cfg: BacktestConfig
 ) -> Optional[float]:
-    """Compute fixed stop-loss price for a new entry (None if not configured)."""
     if cfg.stop_loss_pct > 0:
         dist = price * (cfg.stop_loss_pct / 100.0)
         return price - dist if direction == 1 else price + dist
@@ -449,25 +537,16 @@ def _entry_stop(
         return price - dist if direction == 1 else price + dist
     return None
 
-
 def _isnan(v) -> bool:
-    """Safe NaN check that works for both float and numpy scalar."""
     try:
         import math
         return math.isnan(float(v))
     except (TypeError, ValueError):
         return True
 
-
 def _compute_atr14(
     closes: np.ndarray, highs: np.ndarray, lows: np.ndarray, n: int
 ) -> Optional[np.ndarray]:
-    """
-    Wilder's smoothed ATR(14) — vectorised pre-computation.
-
-    Returns None for series shorter than 15 bars or on error.
-    The first 14 values are NaN (warm-up period).
-    """
     try:
         if n < 15:
             return None
@@ -475,7 +554,6 @@ def _compute_atr14(
         tr   = np.maximum(highs[1:] - lows[1:],
                np.maximum(np.abs(highs[1:] - pc), np.abs(lows[1:] - pc)))
         atr  = np.full(n, np.nan, dtype=float)
-        # Seed ATR with simple mean of first 14 TR values
         atr[14] = float(tr[:14].mean())
         for k in range(15, n):
             atr[k] = (atr[k - 1] * 13.0 + tr[k - 1]) / 14.0

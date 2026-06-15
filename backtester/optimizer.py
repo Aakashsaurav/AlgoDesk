@@ -3,47 +3,6 @@ backtester/optimizer.py
 ------------------------
 Standalone parameter optimizer for any :class:`backtester.models.BacktestConfig`-
 compatible strategy.
-
-DESIGN
-======
-``Optimizer`` is completely decoupled from the engine — it imports
-:func:`backtester.event_loop.run_event_loop` directly and builds a
-minimal pipeline: generate signals → run loop → extract metric.
-
-This decoupling means:
-
-* The engine class stays thin (≈ 60 lines).
-* The optimizer can be swapped, extended, or replaced without touching
-  the event loop.
-* Walk-forward testing can call the same optimizer in rolling windows.
-
-SEARCH METHODS
-==============
-``GRID``
-    Exhaustive search over the Cartesian product of all parameter lists.
-    Complexity: O(∏ len(values_i)).
-
-``RANDOM``
-    Randomly sample ``n_trials`` parameter combinations.  Faster for
-    large search spaces; no guarantee of finding the global optimum.
-
-PARALLELISM
-===========
-Both methods use :class:`concurrent.futures.ProcessPoolExecutor` with
-pickle-based IPC.  To reduce pickling overhead on large DataFrames, the
-raw OHLCV arrays are sent once per worker via ``initializer``/
-``initargs`` and stored in a module-level global — avoiding re-pickling
-the same DataFrame for every parameter combination.
-
-OVERFITTING WARNING
-===================
-In-sample optimization finds the parameters that best fit the
-*historical* data you provided.  These parameters will almost always
-look worse on new data.  Always validate with:
-
-* An out-of-sample hold-out period.
-* Walk-forward testing (``walk_forward()`` below).
-* Monte Carlo simulation on shuffled trade returns.
 """
 
 from __future__ import annotations
@@ -51,15 +10,16 @@ from __future__ import annotations
 import itertools
 import logging
 import random
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from enum import Enum
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Callable, Dict, List, Optional, Type
 
 import numpy as np
 import pandas as pd
 
 from backtester.models import BacktestConfig
 from backtester.event_loop import run_event_loop
+from backtester.performance import compute_performance
 
 logger = logging.getLogger(__name__)
 
@@ -68,15 +28,15 @@ _worker_df:     Optional[pd.DataFrame] = None
 _worker_config: Optional[BacktestConfig] = None
 _worker_symbol: str = "SYMBOL"
 
-
 class SearchMethod(Enum):
-    GRID   = "grid"
-    RANDOM = "random"
+    GRID     = "grid"
+    RANDOM   = "random"
+    BAYESIAN = "bayesian"
 
-
-# ---------------------------------------------------------------------------
-# Worker initializer and task (called in subprocess)
-# ---------------------------------------------------------------------------
+class ExecutorMode(Enum):
+    PROCESS = "process"
+    THREAD  = "thread"
+    AUTO    = "auto"
 
 def _init_worker(df_bytes: bytes, config: BacktestConfig, symbol: str) -> None:
     """Initializer: deserialise the DataFrame once per worker process."""
@@ -86,12 +46,8 @@ def _init_worker(df_bytes: bytes, config: BacktestConfig, symbol: str) -> None:
     _worker_config = config
     _worker_symbol = symbol
 
-
 def _run_one(args: tuple) -> Dict[str, Any]:
-    """
-    Run a single backtest for one parameter combination.
-    Called in a subprocess — reads shared worker globals.
-    """
+    """Run a single backtest for one parameter combination."""
     strategy_class, params, metric = args
     try:
         strategy = strategy_class(**params)
@@ -100,11 +56,9 @@ def _run_one(args: tuple) -> Dict[str, Any]:
             return {**params, metric: np.nan, "error": "no signal column"}
         trade_log, equity, _ = run_event_loop(signals_df, _worker_config, _worker_symbol)
 
-        from backtester.performance import compute_performance
         m = compute_performance(trade_log, equity, _worker_config)
         val = m.get(metric, np.nan)
         row = {**params, metric: round(float(val), 6)}
-        # Include a few bonus metrics for context
         for extra in ("total_trades", "win_rate_pct", "max_drawdown_pct", "total_return_pct"):
             if extra != metric:
                 row[extra] = round(float(m.get(extra, np.nan)), 4)
@@ -113,118 +67,110 @@ def _run_one(args: tuple) -> Dict[str, Any]:
         logger.debug(f"Optimizer worker error ({params}): {exc}")
         return {**params, metric: np.nan, "error": str(exc)}
 
+def _run_one_thread(args: tuple, df: pd.DataFrame, config: BacktestConfig, symbol: str) -> Dict[str, Any]:
+    """Thread version: does not rely on global _worker_df."""
+    strategy_class, params, metric = args
+    try:
+        strategy = strategy_class(**params)
+        signals_df = strategy.generate_signals(df.copy())
+        if "signal" not in signals_df.columns:
+            return {**params, metric: np.nan, "error": "no signal column"}
+        trade_log, equity, _ = run_event_loop(signals_df, config, symbol)
 
-# ---------------------------------------------------------------------------
-# Optimizer class
-# ---------------------------------------------------------------------------
+        m = compute_performance(trade_log, equity, config)
+        val = m.get(metric, np.nan)
+        row = {**params, metric: round(float(val), 6)}
+        for extra in ("total_trades", "win_rate_pct", "max_drawdown_pct", "total_return_pct"):
+            if extra != metric:
+                row[extra] = round(float(m.get(extra, np.nan)), 4)
+        return row
+    except Exception as exc:
+        logger.debug(f"Optimizer thread worker error ({params}): {exc}")
+        return {**params, metric: np.nan, "error": str(exc)}
 
 class Optimizer:
-    """
-    Grid and random parameter search for any BaseStrategy subclass.
-
-    Parameters
-    ----------
-    config : BacktestConfig
-        Engine configuration.  ``initial_capital``, ``segment``, and all
-        risk/order settings are taken from here.  Do NOT pass
-        ``strategy_class`` or ``params`` here — those go to :meth:`run`.
-    max_workers : int
-        Number of parallel worker processes.  Default: CPU count.
-
-    Examples
-    --------
-    >>> from backtester.models import BacktestConfig
-    >>> from backtester.optimizer import Optimizer
-    >>> from strategies.base import EMACrossover
-    >>>
-    >>> config = BacktestConfig(initial_capital=500_000)
-    >>> opt    = Optimizer(config)
-    >>>
-    >>> grid = {"fast_period": [5, 9, 13], "slow_period": [21, 34, 50]}
-    >>> results = opt.run(df, EMACrossover, grid, symbol="INFY")
-    >>> print(results.head())
-    """
-
     def __init__(
         self,
-        config:      BacktestConfig,
-        max_workers: Optional[int] = None,
+        config:        BacktestConfig,
+        max_workers:   Optional[int] = None,
+        executor_mode: ExecutorMode = ExecutorMode.AUTO,
     ) -> None:
-        self.config      = config
-        self.max_workers = max_workers
+        self.config        = config
+        self.max_workers   = max_workers
+        self.executor_mode = executor_mode
 
     def run(
         self,
-        df:             pd.DataFrame,
-        strategy_class: Type,
-        param_grid:     Dict[str, List[Any]],
-        symbol:         str       = "SYMBOL",
-        metric:         str       = "sharpe_ratio",
-        method:         SearchMethod = SearchMethod.GRID,
-        n_trials:       int       = 50,
-        top_n:          int       = 10,
+        df:                pd.DataFrame,
+        strategy_class:    Type,
+        param_grid:        Dict[str, List[Any]],
+        symbol:            str       = "SYMBOL",
+        metric:            str       = "sharpe_ratio",
+        method:            SearchMethod = SearchMethod.GRID,
+        n_trials:          int       = 50,
+        top_n:             int       = 10,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> pd.DataFrame:
-        """
-        Run the parameter search.
+        
+        if method == SearchMethod.BAYESIAN:
+            logger.info("Suggesting SearchMethod.RANDOM as alternative to BAYESIAN.")
+            raise NotImplementedError("Bayesian search planned for Phase 9")
 
-        Parameters
-        ----------
-        df : pd.DataFrame
-            OHLCV DataFrame (same format as used in engine.run).
-        strategy_class : type
-            The strategy class (not an instance).
-        param_grid : dict
-            Mapping from parameter name to list of values to try.
-            Example: ``{"fast": [5, 9], "slow": [21, 34]}``.
-        symbol : str
-        metric : str
-            Performance metric to optimise.  Any key returned by
-            :func:`backtester.performance.compute_performance`.
-            Default: ``"sharpe_ratio"``.
-        method : SearchMethod
-            ``GRID`` (default) or ``RANDOM``.
-        n_trials : int
-            Number of random combinations to try (RANDOM only).
-        top_n : int
-            Return only the top N rows sorted by ``metric``.
-
-        Returns
-        -------
-        pd.DataFrame
-            Sorted by ``metric`` descending.  Each row is one parameter
-            combination with its performance metrics.
-        """
-        # Build combination list
         combos = self._build_combos(param_grid, method, n_trials)
         if not combos:
             logger.warning("Optimizer: empty parameter grid — nothing to search.")
             return pd.DataFrame()
 
+        total = len(combos)
         logger.info(
-            f"Optimizer: {len(combos)} combinations | metric={metric} | "
+            f"Optimizer: {total} combinations | metric={metric} | "
             f"method={method.value} | strategy={strategy_class.__name__}"
         )
 
-        # Serialise the DataFrame once (shared across workers via initializer)
-        import io
-        buf = io.BytesIO()
-        df.to_parquet(buf, index=True)
-        df_bytes = buf.getvalue()
-
         args_list = [(strategy_class, params, metric) for params in combos]
         rows: List[Dict] = []
+        completed = 0
+        
+        mode = self.executor_mode
+        if mode == ExecutorMode.AUTO:
+            try:
+                with ProcessPoolExecutor(max_workers=1) as pool:
+                    pool.submit(int, "1").result()
+                mode = ExecutorMode.PROCESS
+            except Exception:
+                mode = ExecutorMode.THREAD
 
-        with ProcessPoolExecutor(
-            max_workers  = self.max_workers,
-            initializer  = _init_worker,
-            initargs     = (df_bytes, self.config, symbol),
-        ) as pool:
-            futures = {pool.submit(_run_one, a): a for a in args_list}
-            for fut in as_completed(futures):
-                try:
-                    rows.append(fut.result())
-                except Exception as exc:
-                    logger.warning(f"Optimizer future error: {exc}")
+        if mode == ExecutorMode.PROCESS:
+            import io
+            buf = io.BytesIO()
+            df.to_parquet(buf, index=True)
+            df_bytes = buf.getvalue()
+
+            with ProcessPoolExecutor(
+                max_workers  = self.max_workers,
+                initializer  = _init_worker,
+                initargs     = (df_bytes, self.config, symbol),
+            ) as pool:
+                futures = {pool.submit(_run_one, a): a for a in args_list}
+                for fut in as_completed(futures):
+                    try:
+                        rows.append(fut.result())
+                    except Exception as exc:
+                        logger.warning(f"Optimizer future error: {exc}")
+                    completed += 1
+                    if progress_callback:
+                        progress_callback(completed, total)
+        else:
+            with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+                futures = {pool.submit(_run_one_thread, a, df, self.config, symbol): a for a in args_list}
+                for fut in as_completed(futures):
+                    try:
+                        rows.append(fut.result())
+                    except Exception as exc:
+                        logger.warning(f"Optimizer thread future error: {exc}")
+                    completed += 1
+                    if progress_callback:
+                        progress_callback(completed, total)
 
         if not rows:
             return pd.DataFrame()
@@ -235,13 +181,16 @@ class Optimizer:
             .sort_values(metric, ascending=False)
             .reset_index(drop=True)
         )
-        logger.info(
-            f"Optimizer complete. Best {metric}={result[metric].iloc[0]:.4f} "
-            f"→ {dict(result.iloc[0][list(param_grid.keys())])}"
-        )
+        
+        if result.empty:
+            logger.info("Optimizer complete. All runs failed or returned NaN metric.")
+        else:
+            logger.info(
+                f"Optimizer complete. Best {metric}={result[metric].iloc[0]:.4f} "
+                f"→ {dict(result.iloc[0][list(param_grid.keys())])}"
+            )
         return result.head(top_n)
 
-    # ------------------------------------------------------------------
     def walk_forward(
         self,
         df:             pd.DataFrame,
@@ -255,18 +204,6 @@ class Optimizer:
         method:         SearchMethod = SearchMethod.GRID,
         n_trials:       int       = 30,
     ) -> pd.DataFrame:
-        """
-        Rolling walk-forward optimisation.
-
-        Trains on a ``train_bars``-wide window, tests on the subsequent
-        ``test_bars`` bars, then rolls forward by ``step_bars``.
-
-        Returns
-        -------
-        pd.DataFrame
-            One row per walk-forward window with the best parameters and
-            the out-of-sample ``metric`` achieved in the test period.
-        """
         n = len(df)
         results: List[Dict] = []
         start = 0
@@ -280,7 +217,6 @@ class Optimizer:
                 f"[{start+train_bars}:{start+train_bars+test_bars}] test"
             )
 
-            # Optimise on training data
             opt_results = self.run(
                 df=train_df, strategy_class=strategy_class,
                 param_grid=param_grid, symbol=symbol, metric=metric,
@@ -292,13 +228,11 @@ class Optimizer:
 
             best_params = {k: opt_results.iloc[0][k] for k in param_grid.keys()}
 
-            # Evaluate best params on out-of-sample test data
             try:
                 strategy   = strategy_class(**best_params)
                 signals_df = strategy.generate_signals(test_df.copy())
                 trade_log, equity, _ = run_event_loop(signals_df, self.config, symbol)
 
-                from backtester.performance import compute_performance
                 m = compute_performance(trade_log, equity, self.config)
 
                 row = {
@@ -318,7 +252,6 @@ class Optimizer:
 
         return pd.DataFrame(results)
 
-    # ------------------------------------------------------------------
     @staticmethod
     def _build_combos(
         param_grid: Dict[str, List[Any]],
@@ -331,7 +264,6 @@ class Optimizer:
         if method == SearchMethod.GRID:
             return [dict(zip(keys, combo)) for combo in itertools.product(*values)]
 
-        # RANDOM
         all_combos = list(itertools.product(*values))
         k = min(n_trials, len(all_combos))
         return [dict(zip(keys, c)) for c in random.sample(all_combos, k)]

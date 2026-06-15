@@ -21,26 +21,37 @@ from backtester.models import (
     Trade,
     OrderType,
     TrailingType,
+    PortfolioResult,
 )
 from backtester.datafeed import BacktestDataFeed
 from backtester.engine import BacktestEngine
-from backtester.optimizer import Optimizer, SearchMethod
+from backtester.optimizer import Optimizer, SearchMethod, ExecutorMode
 from backtester.performance import compute_performance
-from backtester.portfolio import Portfolio
 from backtester.report import generate_report
+from backtester.exporter import BacktestExporter
+from backtester.commission import (
+    IndianEquityCommission,
+    CommissionBase,
+    ZeroCommission,
+)
 
 __all__ = [
     "BacktestEngine",
     "BacktestDataFeed",
     "BacktestConfig",
     "BacktestResult",
+    "PortfolioResult",
     "Position",
     "Trade",
     "OrderType",
     "TrailingType",
     "Optimizer",
     "SearchMethod",
+    "ExecutorMode",
     "compute_performance",
-    "Portfolio",
     "generate_report",
+    "BacktestExporter",
+    "IndianEquityCommission",
+    "CommissionBase",
+    "ZeroCommission",
 ]

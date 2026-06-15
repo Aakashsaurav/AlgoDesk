@@ -51,6 +51,7 @@ def compute_quantity(
     stop_price:       Optional[float] = None,
     atr:              Optional[float] = None,
     atr_mult:         float = 2.0,
+    lot_size:         int = 1,
 ) -> int:
     """
     Calculate how many shares to buy/sell for one trade.
@@ -119,6 +120,8 @@ def compute_quantity(
         return 0
     max_affordable = int(math.floor(cash / entry_price))
     qty = min(qty, max_affordable)
+    
+    qty = (qty // lot_size) * lot_size
 
     if qty <= 0:
         logger.debug(f"position_sizer: qty=0 (cash={cash:.0f}, price={entry_price:.2f})")

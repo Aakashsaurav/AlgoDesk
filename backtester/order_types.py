@@ -1,61 +1,12 @@
 """
 backtester/order_types.py
 --------------------------
-Pending order dataclass and fill-check functions for LIMIT, STOP, and
-STOP-LIMIT orders.
+Fill-check functions for pending entry orders and new types.
 
 All functions are pure (no side-effects) and operate on scalar values —
 making them trivially unit-testable and reusable by both the event loop
 and a future tick-replay engine.
-
-The ``Position`` class owns its own trailing-stop logic (see models.py).
-This module handles only *pending entry* orders that have not yet filled.
 """
-
-from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Optional
-
-from backtester.models import OrderType
-
-
-# ---------------------------------------------------------------------------
-# Pending entry order
-# ---------------------------------------------------------------------------
-
-@dataclass
-class PendingOrder:
-    """
-    An entry order that has been placed but not yet filled.
-
-    Attributes
-    ----------
-    direction : int
-        +1 buy, -1 sell.
-    order_type : OrderType
-    quantity : int
-    signal_bar : int
-        Bar index at which the signal was generated.
-    limit_price : float or None
-        Fill price cap for LIMIT and STOP_LIMIT orders.
-    stop_price : float or None
-        Trigger price for STOP and STOP_LIMIT orders.
-    expires_after : int
-        Cancel after this many bars (0 = Good-Till-Cancelled).
-    """
-    direction:     int
-    order_type:    OrderType
-    quantity:      int
-    signal_bar:    int
-    limit_price:   Optional[float] = None
-    stop_price:    Optional[float] = None
-    expires_after: int = 0
-
-
-# ---------------------------------------------------------------------------
-# Fill-check functions  (all pure, all O(1))
-# ---------------------------------------------------------------------------
 
 def check_limit_fill(
     direction:   int,
@@ -168,3 +119,48 @@ def check_stop_limit_fill(
 
     # Stop triggered but limit not reachable yet
     return False, 0.0, True
+
+def check_bracket_fill(
+    direction:   int,
+    limit_price: float,
+    open_p:      float,
+    low:         float,
+    high:        float,
+) -> tuple[bool, float]:
+    """Same as LIMIT fill logic — bracket fills at limit or better."""
+    return check_limit_fill(direction, limit_price, open_p, low, high)
+
+def check_cover_fill(
+    direction:   int,
+    limit_price: float,
+    open_p:      float,
+    low:         float,
+    high:        float,
+) -> tuple[bool, float]:
+    """Same as LIMIT fill logic — cover fills at limit or better."""
+    return check_limit_fill(direction, limit_price, open_p, low, high)
+
+def check_amo_fill(
+    bar_idx: int,
+    signal_bar: int,
+    open_p: float,
+) -> tuple[bool, float]:
+    """
+    Fills at open_p of bar immediately after signal.
+    """
+    if bar_idx == signal_bar + 1:
+        return True, open_p
+    return False, 0.0
+
+def check_gtt_fill(
+    trigger_price: float,
+    direction: int,
+    open_p: float,
+    high: float,
+    low: float,
+) -> tuple[bool, float]:
+    """
+    Like STOP fill but with indefinite expiry. Trigger check logic.
+    Returns (triggered, fill_price).
+    """
+    return check_stop_fill(direction, trigger_price, open_p, low, high)

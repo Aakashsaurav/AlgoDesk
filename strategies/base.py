@@ -178,7 +178,11 @@ class BaseStrategy(ABC):
     def on_bar_close(
         self,
         bar_idx: int,
-        row: pd.Series,
+        open_p: float,
+        high_p: float,
+        low_p: float,
+        close_p: float,
+        tag: str,
         direction: int,
         current_sl: float,
     ) -> float:

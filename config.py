@@ -146,6 +146,13 @@ class AppConfig:
     SCREENER_TIMEOUT_PER_SYMBOL: float = float(os.getenv("SCREENER_TIMEOUT_PER_SYMBOL", "30.0"))
     SCREENER_HISTORY_DB: Path = SQLITE_DIR / "screener_history.db"
 
+    # ── Backtester settings ──────────────────────────────────────────────────
+    BACKTESTER_OUTPUT_DIR: Path = BASE_DIR / "backtester" / "output"
+    BACKTESTER_TRADE_DIR: Path  = BACKTESTER_OUTPUT_DIR / "trade"
+    BACKTESTER_CHART_DIR: Path  = BACKTESTER_OUTPUT_DIR / "chart"
+    BACKTESTER_REPORT_DIR: Path = BACKTESTER_OUTPUT_DIR / "report"
+    BACKTESTER_MAX_WORKERS: int = int(os.getenv("BACKTESTER_MAX_WORKERS", "4"))
+
     # Legacy flat paths — used by broker/upstox/data_manager.py.
     # New code should use DataManager which builds hierarchical paths:
     #   ohlcv/<exchange>/<instrument_type>/<timeframe>/<symbol>/
@@ -196,6 +203,8 @@ class AppConfig:
             self.DATA_DIR, self.OHLCV_DIR, self.SQLITE_DIR,
             self.LIVE_TICK_DIR, self.UNIVERSE_DIR,
             self.SCREENER_OUTPUT_DIR,
+            self.BACKTESTER_OUTPUT_DIR, self.BACKTESTER_TRADE_DIR,
+            self.BACKTESTER_CHART_DIR, self.BACKTESTER_REPORT_DIR,
             self.BASE_DIR / "logs",
         ):
             try:
