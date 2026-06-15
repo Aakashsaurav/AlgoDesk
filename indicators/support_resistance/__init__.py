@@ -15,7 +15,7 @@ from indicators.registry import register_indicator
 @register_indicator(
     name="scan_all_levels",
     category="SUPPORT_RESISTANCE",
-    inputs=["high", "low", "close"],
+    inputs=["df"],
     outputs=["levels"],
     parameters={"methods": ["pivot", "swing", "fibonacci"]}
 )

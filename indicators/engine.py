@@ -67,8 +67,12 @@ class IndicatorEngine:
         self._cache: Dict[tuple, Any] = {}
         self._builtin_module_cache: Dict[str, Optional[Callable]] = {}
         self.max_cache_size = max_cache_size
-        
-        # Load user-defined custom indicators from SQLite
+        self._custom_loaded: bool = False
+
+    def _ensure_custom_loaded(self) -> None:
+        if self._custom_loaded:
+            return
+        self._custom_loaded = True
         try:
             from indicators.custom import CustomIndicatorLoader
             loader = CustomIndicatorLoader()
@@ -93,6 +97,7 @@ class IndicatorEngine:
 
     def has(self, name: str) -> bool:
         """Return True if the indicator is known to this engine."""
+        self._ensure_custom_loaded()
         return name in self._custom or self._has_builtin(name) or hasattr(self._bridge, name)
 
     def default_name(self, indicator: Any, fallback: str = "indicator") -> str:
@@ -199,6 +204,7 @@ class IndicatorEngine:
         if not indicator_name:
             raise ValueError("indicator name must not be empty")
 
+        self._ensure_custom_loaded()
         builtin = self._builtin_lookup(indicator_name)
         if indicator_name in self._custom:
             return self._custom[indicator_name]

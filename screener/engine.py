@@ -1,96 +1,257 @@
 """
 screener/engine.py
 ------------------
-Standalone screener module that reuses the indicator and strategy stack.
-
-Use cases:
-  - Run a multi-ticker screen using existing strategies and indicators.
-  - Keep the screener output compatible with dashboards or CLI summaries.
-  - Reuse the ``algodesk.data_plan`` loader so instrument-aware defaults apply.
-
-P0 FIX (2026-04-11) — filter_hours TypeError crashes all tickers silently
-==========================================================================
-``_default_loader`` was passing ``filter_hours=config.filter_hours`` to
-``UpstoxDataAdapter.fetch_ohlcv()``. That method has no ``filter_hours``
-parameter, so every call raised:
-
-    TypeError: fetch_ohlcv() got an unexpected keyword argument 'filter_hours'
-
-Because ``ScreenerEngine.run()`` wraps each ticker fetch in a bare
-``except Exception``, the TypeError was silently swallowed for every
-ticker — the screener completed with zero results and no visible error.
-
-Fix: remove ``filter_hours`` from the ``fetch_ohlcv`` call.
-``ScreenerConfig.filter_hours`` is kept for future use when the data
-adapter gains support for it.
+The core execution engine for the unified screener.
 """
 
-from __future__ import annotations
-
 import logging
-from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 
 import pandas as pd
 
-from broker.upstox.data_adapter import UpstoxDataAdapter
-from screener.base import ScreenResult, ScreenerConfig, ScreenRule
+from screener.base import (
+    ScreenMode, ScreenerConfig, ScreenResult, ScanSummary, TickData,
+    SignalDirection, RankBy
+)
+from screener.rules.base import ScreenRule
+from screener.filters import PreFilter, DataValidator
+from screener.scoring import Scorer, ScoreMode
 
 logger = logging.getLogger(__name__)
 
 
-Loader = Callable[[ScreenerConfig, str], pd.DataFrame]
-
-
-@dataclass(slots=True)
 class ScreenerEngine:
-    config: ScreenerConfig
-    rules: Sequence[ScreenRule]
-    loader: Loader = field(default_factory=lambda: _default_loader)
+    def __init__(
+        self,
+        config: ScreenerConfig,
+        rule: ScreenRule,
+        pre_filter: PreFilter | None = None,
+        scorer: Scorer | None = None
+    ):
+        self.config = config
+        self.rule = rule
+        self.pre_filter = pre_filter or PreFilter()
+        self.scorer = scorer or Scorer(ScoreMode.HIT_COUNT)
+        self.validator = DataValidator()
 
-    def run(self) -> List[ScreenResult]:
-        if not self.rules:
-            raise ValueError("At least one screening rule must be provided.")
-        results: List[ScreenResult] = []
-        for ticker in self.config.tickers:
+    def _evaluate_symbol(self, symbol: str, df: pd.DataFrame, scan_date: str, scan_time: str) -> ScreenResult | None:
+        """
+        Evaluate a single symbol's DataFrame against the pre-filter and rule tree.
+        """
+        # Validate data
+        is_valid, err = self.validator.validate(symbol, df)
+        if not is_valid:
+            logger.debug(f"[{symbol}] Validation failed: {err}")
+            return None
+
+        # Apply pre-filters
+        passed_filter, filter_err = self.pre_filter.apply(symbol, df)
+        if not passed_filter:
+            logger.debug(f"[{symbol}] Pre-filter failed: {filter_err}")
+            return None
+
+        # Evaluate rules
+        rule_res = self.rule.evaluate_safe(df)
+        
+        # We need to flatten composite rules to count passed/total.
+        # But for now, we just pass the top-level details to the scorer.
+        # If the top rule is a composite, its 'details' contains the sub-rules.
+        # Let's extract the sub-rules for scoring.
+        rule_details = {}
+        if hasattr(self.rule, "rules"): # Composite rule
+            rule_details = rule_res.details
+        else:
+            rule_details = {self.rule.name: rule_res}
+
+        score = self.scorer.score(rule_details, self.config.rule_weights)
+        
+        passed_count = sum(1 for r in rule_details.values() if r.passed)
+        total_count = len(rule_details)
+
+        # Extract market snapshot
+        close = float(df["close"].iloc[-1])
+        volume = float(df["volume"].iloc[-1])
+        
+        # Calculate ATR% if possible
+        atr_pct = None
+        if len(df) >= 14:
+            from indicators.engine import IndicatorEngine
             try:
-                df = self.loader(self.config, ticker)
-            except Exception as exc:
-                logger.warning("Skipping %s: %s", ticker, exc)
+                eng = IndicatorEngine()
+                atr_df = eng.compute("atr", df)
+                atr_val = atr_df["atr"].iloc[-1]
+                atr_pct = (atr_val / close) * 100
+            except Exception:
+                pass
+
+        # Determine signal direction (default to BULLISH for now unless specified)
+        # We can extract direction from the rules if we want, but default to ANY/BULLISH
+        # For simplicity, we just say if it passed, it's a signal.
+        direction = SignalDirection.BULLISH
+
+        result = ScreenResult(
+            symbol=symbol,
+            scan_date=scan_date,
+            scan_time=scan_time,
+            mode=self.config.mode,
+            rules_passed=passed_count,
+            rules_total=total_count,
+            passed=rule_res.passed,
+            score=score,
+            signal_direction=direction,
+            close=close,
+            volume=volume,
+            atr_pct=atr_pct,
+            rule_details=rule_details,
+            indicator_values={} # Can be populated if needed
+        )
+        return result
+
+    def run_eod(self, data_dict: dict[str, pd.DataFrame]) -> ScanSummary:
+        """
+        Run EOD scan across all symbols in parallel.
+        """
+        start_time = time.monotonic()
+        now = datetime.now()
+        scan_date = now.strftime("%Y-%m-%d")
+        scan_time = now.strftime("%H:%M:%S")
+
+        results: list[ScreenResult] = []
+        errored = 0
+
+        with ThreadPoolExecutor(max_workers=self.config.n_workers) as executor:
+            futures = {
+                executor.submit(self._evaluate_symbol, sym, df, scan_date, scan_time): sym
+                for sym, df in data_dict.items() if sym in self.config.symbols
+            }
+
+            for future in as_completed(futures, timeout=self.config.timeout_per_symbol * len(futures)):
+                try:
+                    res = future.result()
+                    if res is not None:
+                        results.append(res)
+                except Exception as e:
+                    sym = futures[future]
+                    logger.error(f"Error evaluating {sym}: {e}")
+                    errored += 1
+
+        # Apply ranking
+        ranked_results = self.scorer.rank(results, self.config.rank_by, self.config.rank_ascending)
+
+        # Apply max_results
+        if self.config.max_results > 0:
+            ranked_results = ranked_results[:self.config.max_results]
+
+        elapsed = time.monotonic() - start_time
+        
+        passed_count = sum(1 for r in ranked_results if r.passed)
+        failed_count = len(ranked_results) - passed_count
+
+        return ScanSummary(
+            scan_name=self.config.scan_name,
+            mode=ScreenMode.EOD,
+            scan_date=scan_date,
+            elapsed_seconds=elapsed,
+            symbols_scanned=len(futures),
+            symbols_passed=passed_count,
+            symbols_failed=failed_count,
+            symbols_errored=errored,
+            results=ranked_results
+        )
+
+    def run_historical(self, data_dict: dict[str, pd.DataFrame]) -> ScanSummary:
+        """
+        Run a sliding window backtest across the requested date range.
+        """
+        if not self.config.date_range:
+            raise ValueError("date_range must be set in config for HISTORICAL mode")
+
+        start_date, end_date = self.config.date_range
+        start_time = time.monotonic()
+        
+        all_results = []
+        errored = 0
+        symbols_scanned = 0
+
+        for sym, df in data_dict.items():
+            if sym not in self.config.symbols:
                 continue
-            for rule in self.rules:
-                meta = rule.evaluate(df)
-                result = ScreenResult(
-                    ticker=ticker,
-                    passed=meta is not None,
-                    rule_name=rule.name,
-                    timestamp=meta.get("timestamp") if meta else None,
-                    details=meta or {},
-                )
-                results.append(result)
-        return results
+            
+            symbols_scanned += 1
+            # Filter dates
+            mask = (df.index >= start_date) & (df.index <= end_date)
+            eval_dates = df.index[mask]
 
+            for current_date in eval_dates:
+                # Slice data up to current_date
+                slice_df = df.loc[:current_date]
+                if len(slice_df) < self.config.min_bars:
+                    continue
 
-def _default_loader(config: ScreenerConfig, ticker: str) -> pd.DataFrame:
-    """
-    Fetch OHLCV data for a single ticker using the Upstox data adapter.
+                scan_date = current_date.strftime("%Y-%m-%d")
+                scan_time = "15:30:00" # EOD
+                
+                try:
+                    res = self._evaluate_symbol(sym, slice_df, scan_date, scan_time)
+                    if res is not None and res.passed: # In historical mode, typically we only keep passes
+                        all_results.append(res)
+                except Exception as e:
+                    logger.error(f"Historical error for {sym} on {scan_date}: {e}")
+                    errored += 1
 
-    P0 FIX: ``filter_hours`` has been removed from this call.
-    ``UpstoxDataAdapter.fetch_ohlcv`` does not accept that parameter;
-    passing it caused a TypeError that silently dropped every ticker.
-    ``ScreenerConfig.filter_hours`` is preserved for future use.
-    """
-    return UpstoxDataAdapter().fetch_ohlcv(
-        instrument_type=config.instrument_type,
-        exchange=config.exchange,
-        trading_symbol=ticker,
-        unit=config.unit,
-        interval=config.interval,
-        from_date=config.from_date,
-        to_date=config.to_date,
-        period=config.period,
-        #filter_hours=config.filter_hours, 
-        # filter_hours is intentionally omitted — UpstoxDataAdapter.fetch_ohlcv
-        # does not support this parameter as of the current adapter version.
-        # When adapter support is added, wire it back here.
-    )
+        ranked_results = self.scorer.rank(all_results, self.config.rank_by, self.config.rank_ascending)
+
+        if self.config.max_results > 0:
+            ranked_results = ranked_results[:self.config.max_results]
+
+        elapsed = time.monotonic() - start_time
+        
+        return ScanSummary(
+            scan_name=self.config.scan_name,
+            mode=ScreenMode.HISTORICAL,
+            scan_date=f"{start_date} to {end_date}",
+            elapsed_seconds=elapsed,
+            symbols_scanned=symbols_scanned,
+            symbols_passed=len(ranked_results),
+            symbols_failed=0,
+            symbols_errored=errored,
+            results=ranked_results
+        )
+
+    def process_tick(self, tick: TickData, df_history: pd.DataFrame) -> ScreenResult | None:
+        """
+        Fast path for live data stream.
+        Appends the tick to history and evaluates.
+        """
+        # Validate tick
+        is_valid, err = self.validator.validate_tick(tick.symbol, tick)
+        if not is_valid:
+            logger.debug(f"[{tick.symbol}] Tick validation failed: {err}")
+            return None
+
+        # Pre-filter tick
+        passed_filter, filter_err = self.pre_filter.apply_tick(tick.symbol, tick)
+        if not passed_filter:
+            logger.debug(f"[{tick.symbol}] Tick pre-filter failed: {filter_err}")
+            return None
+
+        # Convert tick to row and append to history
+        row = tick.to_ohlcv_row()
+        tick_df = pd.DataFrame([row]).set_index("timestamp")
+        combined_df = pd.concat([df_history, tick_df])
+        
+        scan_date = tick.timestamp.strftime("%Y-%m-%d")
+        scan_time = tick.timestamp.strftime("%H:%M:%S")
+
+        res = self._evaluate_symbol(tick.symbol, combined_df, scan_date, scan_time)
+        if res:
+            res.ltp = tick.ltp
+            res.bid = tick.bid_prices[0] if tick.bid_prices else None
+            res.ask = tick.ask_prices[0] if tick.ask_prices else None
+            res.depth = {
+                "bids": tick.bid_prices,
+                "asks": tick.ask_prices
+            }
+        return res

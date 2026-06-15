@@ -51,6 +51,8 @@ class IndicatorRegistry:
     """Thread-safe registry for indicator metadata."""
     _registry: Dict[str, IndicatorMeta] = {}
     _lock = threading.RLock()
+    _core_registered: bool = False
+    _external_registered: bool = False
 
     @classmethod
     def register(cls, meta: IndicatorMeta) -> None:
@@ -61,12 +63,16 @@ class IndicatorRegistry:
     @classmethod
     def get(cls, name: str) -> Optional[IndicatorMeta]:
         """Get indicator metadata by name."""
+        cls.auto_register_core()
+        cls.auto_register_external()
         with cls._lock:
             return cls._registry.get(name)
 
     @classmethod
     def list_all(cls) -> Dict[str, IndicatorMeta]:
         """Return a copy of all registered indicators."""
+        cls.auto_register_core()
+        cls.auto_register_external()
         with cls._lock:
             return cls._registry.copy()
 
@@ -75,31 +81,35 @@ class IndicatorRegistry:
         """
         Eagerly import core indicator modules to run their decorators.
         """
-        import sys
-        import importlib
-        for module_name in [
-            "indicators.moving_averages",
-            "indicators.oscillators",
-            "indicators.volatility",
-            "indicators.trend",
-            "indicators.volume",
-            "indicators.statistics",
-            "indicators.patterns.candlestick",
-            "indicators.patterns.dow_patterns",
-        ]:
-            try:
-                if module_name in sys.modules:
-                    importlib.reload(sys.modules[module_name])
-                else:
-                    importlib.import_module(module_name)
-            except Exception as e:
-                logger.error(f"Failed to auto-register {module_name}: {e}")
+        with cls._lock:
+            if cls._core_registered:
+                return
+            import sys
+            import importlib
+            for module_name in [
+                "indicators.moving_averages",
+                "indicators.oscillators",
+                "indicators.volatility",
+                "indicators.trend",
+                "indicators.volume",
+                "indicators.statistics",
+                "indicators.patterns.candlestick",
+                "indicators.patterns.dow_patterns",
+            ]:
+                try:
+                    if module_name not in sys.modules:
+                        importlib.import_module(module_name)
+                except Exception as e:
+                    logger.error(f"Failed to auto-register {module_name}: {e}")
+            cls._core_registered = True
 
 
     @classmethod
     def auto_register_external(cls) -> None:
         """Auto-register TA-Lib and pandas-ta functions if available."""
         with cls._lock:
+            if cls._external_registered:
+                return
             try:
                 import talib
                 for func_name in talib.get_functions():
@@ -135,12 +145,16 @@ class IndicatorRegistry:
     @classmethod
     def get_by_category(cls, category: str) -> Dict[str, IndicatorMeta]:
         """Return indicators filtered by category."""
+        cls.auto_register_core()
+        cls.auto_register_external()
         with cls._lock:
             return {k: v for k, v in cls._registry.items() if v.category == category}
 
     @classmethod
     def search(cls, query: str) -> Dict[str, IndicatorMeta]:
         """Search indicators by name or description."""
+        cls.auto_register_core()
+        cls.auto_register_external()
         query = query.lower()
         with cls._lock:
             return {
@@ -151,6 +165,8 @@ class IndicatorRegistry:
     @classmethod
     def to_json_schema(cls) -> List[Dict[str, Any]]:
         """Export registry as a list of dictionaries for the UI/Screener."""
+        cls.auto_register_core()
+        cls.auto_register_external()
         with cls._lock:
             return [
                 {
@@ -206,7 +222,3 @@ def register_indicator(
     return decorator
 
 __all__ = ["IndicatorMeta", "IndicatorRegistry", "register_indicator", "Categories"]
-
-# Auto-register core and external libraries at module load
-IndicatorRegistry.auto_register_core()
-IndicatorRegistry.auto_register_external()

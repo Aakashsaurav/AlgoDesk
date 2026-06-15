@@ -140,6 +140,12 @@ class AppConfig:
     UNIVERSE_DIR: Path = DATA_DIR / "universes"
     CUSTOM_INDICATOR: Path = BASE_DIR / "indicators" / "custom_indicators.db"
 
+    # ── Screener settings ────────────────────────────────────────────────────
+    SCREENER_OUTPUT_DIR: Path = BASE_DIR / "screener" / "output"
+    SCREENER_MAX_WORKERS: int = int(os.getenv("SCREENER_MAX_WORKERS", "8"))
+    SCREENER_TIMEOUT_PER_SYMBOL: float = float(os.getenv("SCREENER_TIMEOUT_PER_SYMBOL", "30.0"))
+    SCREENER_HISTORY_DB: Path = SQLITE_DIR / "screener_history.db"
+
     # Legacy flat paths — used by broker/upstox/data_manager.py.
     # New code should use DataManager which builds hierarchical paths:
     #   ohlcv/<exchange>/<instrument_type>/<timeframe>/<symbol>/
@@ -189,6 +195,7 @@ class AppConfig:
         for d in (
             self.DATA_DIR, self.OHLCV_DIR, self.SQLITE_DIR,
             self.LIVE_TICK_DIR, self.UNIVERSE_DIR,
+            self.SCREENER_OUTPUT_DIR,
             self.BASE_DIR / "logs",
         ):
             try:

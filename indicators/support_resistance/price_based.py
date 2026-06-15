@@ -171,8 +171,6 @@ def recent_high_low(high: pd.Series, low: pd.Series, close: pd.Series, window: i
 
 __all__ = [
     "calculate_swing_levels",
-    "_cluster_levels",
-    "_score_level",
     "volume_profile_sr",
     "round_number_sr",
     "recent_high_low"
