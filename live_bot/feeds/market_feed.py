@@ -48,7 +48,7 @@ from live_bot.state import TickData, state as live_state
 
 logger = logging.getLogger(__name__)
 
-LTP_V3_URL = f"{config.BASE_URL}/v3/market-quote/ltp"
+LTP_V3_URL = f"{config.UPSTOX_BASE_URL}/v3/market-quote/ltp"
 
 # Upstox docs: standard endpoints are rate limited per second and per minute.
 # A 0.13s request spacing stays below both 50 req/sec and 500 req/min.

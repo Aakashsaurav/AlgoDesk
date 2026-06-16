@@ -81,7 +81,7 @@ from live_bot.feeds.market_feed import BaseMarketFeed, MarketFeed, RestMarketFee
 from live_bot.feeds.portfolio_feed import PortfolioFeed
 from live_bot.risk.risk_guard import RiskGuard
 from live_bot.orders.paper_broker import PaperBroker
-from strategies.base_strategy_github import BaseStrategy, Action, Signal
+from strategies.base import BaseStrategy, Action, Signal
 
 logger = logging.getLogger(__name__)
 
@@ -610,8 +610,9 @@ class LiveBotEngine:
 
         # ── Inspect LAST bar only ─────────────────────────────────────────────
         last = df.iloc[-1]
-        signal_value = int(last.get("signal", 0))
+        signal_value = int(last.get("signal", 0)) if not pd.isna(last.get("signal", 0)) else 0
         signal_tag   = str(last.get("signal_tag", self._strategy.__class__.__name__))
+        reason       = str(last.get("reason", ""))
 
         tick = live_state.get_tick(symbol)
         if tick is None:
@@ -622,8 +623,29 @@ class LiveBotEngine:
         instrument_key = tick.instrument_key
 
         # ── Compute stop loss & take profit ───────────────────────────────────
-        stop_loss   = float(last.get("stop_loss",   0) or 0) or None
-        take_profit = float(last.get("take_profit", 0) or 0) or None
+        # Fallback to older aliases if present
+        sl_val = last.get("stop_loss")
+        if pd.isna(sl_val) or not sl_val:
+            sl_val = last.get("signal_sl", 0)
+        tp_val = last.get("take_profit")
+        if pd.isna(tp_val) or not tp_val:
+            tp_val = last.get("signal_tp", 0)
+            
+        stop_loss   = float(sl_val) if sl_val else None
+        take_profit = float(tp_val) if tp_val else None
+
+        # Handle order_spec in live mode
+        order_spec = last.get("order_spec")
+        order_type_str = "MARKET"
+        if order_spec is not None and not pd.isna(order_spec):
+            if hasattr(order_spec, "order_type") and order_spec.order_type.name != "MARKET":
+                logger.warning(
+                    f"[Risk/Audit] {symbol}: Unsupported order_type '{order_spec.order_type.name}' "
+                    f"in order_spec. Live bot currently supports MARKET orders safely. Rejecting signal."
+                )
+                return
+            if getattr(order_spec, "tag", None):
+                signal_tag = str(order_spec.tag)
 
         # Default stop loss: 2% below entry (for long)
         if stop_loss is None and signal_value == 1:
@@ -640,11 +662,12 @@ class LiveBotEngine:
                     instrument_key = instrument_key,
                     action         = "BUY",
                     quantity       = qty,
-                    order_type     = "MARKET",
+                    order_type     = order_type_str,
                     stop_loss      = stop_loss,
                     take_profit    = take_profit,
                     strategy_tag   = signal_tag,
                 )
+                logger.info(f"[Risk/Audit] {symbol} BUY Order Placed | Strategy: {self._strategy.__class__.__name__} | Tag: {signal_tag} | Reason: {reason}")
             else:
                 logger.info(f"[StrategyThread] {symbol} BUY blocked: {reason}")
 
@@ -661,9 +684,10 @@ class LiveBotEngine:
                         instrument_key = instrument_key,
                         action         = "SELL",
                         quantity       = position.quantity,
-                        order_type     = "MARKET",
+                        order_type     = order_type_str,
                         strategy_tag   = signal_tag,
                     )
+                    logger.info(f"[Risk/Audit] {symbol} SELL Order Placed | Strategy: {self._strategy.__class__.__name__} | Tag: {signal_tag} | Reason: {reason}")
                 else:
                     logger.warning(f"[StrategyThread] {symbol} SELL blocked: {reason}")
 
@@ -677,11 +701,12 @@ class LiveBotEngine:
                     instrument_key = instrument_key,
                     action         = "SHORT",
                     quantity       = qty,
-                    order_type     = "MARKET",
+                    order_type     = order_type_str,
                     stop_loss      = stop_loss,
                     take_profit    = take_profit,
                     strategy_tag   = signal_tag,
                 )
+                logger.info(f"[Risk/Audit] {symbol} SHORT Order Placed | Strategy: {self._strategy.__class__.__name__} | Tag: {signal_tag} | Reason: {reason}")
 
     def _check_all_sl_tp(self) -> None:
         """Check stop-loss and take-profit for all open positions."""

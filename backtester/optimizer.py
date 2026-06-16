@@ -20,6 +20,7 @@ import pandas as pd
 from backtester.models import BacktestConfig
 from backtester.event_loop import run_event_loop
 from backtester.performance import compute_performance
+from strategies.registry import get_strategy_schema
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,29 @@ class Optimizer:
         top_n:             int       = 10,
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> pd.DataFrame:
+        
+        # 1. Validate param_grid against registry schema
+        strategy_name = getattr(strategy_class, "name", strategy_class.__name__)
+        # Fallback to class name string if strategy_name doesn't match registry exactly
+        try:
+            schema = get_strategy_schema(strategy_class.__name__)
+            schema_params = schema.get("params", [])
+            optimizable_keys = {p["name"] for p in schema_params if p.get("optimize", True)}
+            
+            for k in param_grid:
+                if k not in optimizable_keys:
+                    raise ValueError(f"Parameter '{k}' is not marked as optimize=True in the registry schema for {strategy_class.__name__}.")
+        except Exception as e:
+            if isinstance(e, ValueError) and "Parameter" in str(e):
+                raise
+            # If strategy not in registry or other error, fallback to warning
+            logger.debug(f"Could not validate schema for {strategy_class.__name__}: {e}")
+
+        # 2. Check for REQUIRED_EXTRA_COLUMNS
+        if hasattr(strategy_class, "REQUIRED_EXTRA_COLUMNS"):
+            req_cols = getattr(strategy_class, "REQUIRED_EXTRA_COLUMNS")
+            if "benchmark_close" in req_cols and "benchmark_close" not in df.columns:
+                raise ValueError(f"Strategy {strategy_class.__name__} requires 'benchmark_close' column in input data.")
         
         if method == SearchMethod.BAYESIAN:
             logger.info("Suggesting SearchMethod.RANDOM as alternative to BAYESIAN.")

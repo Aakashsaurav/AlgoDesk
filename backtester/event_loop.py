@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from backtester.models import BacktestConfig, Position, Trade
-from backtester.orders import OrderType, PendingOrder, GTTOrder
+from backtester.orders import OrderType, PendingOrder, GTTOrder, OrderSpec
 from backtester.fill_engine import FillEngine
 from backtester.position_sizer import compute_quantity
 from risk.engine import RiskEngine
@@ -50,6 +50,11 @@ def run_event_loop(
         gtt_col = signals_df["gtt_orders"].values
     else:
         gtt_col = np.full(len(signals_df), None, dtype=object)
+
+    if "order_spec" in signals_df.columns:
+        ospec_col = signals_df["order_spec"].values
+    else:
+        ospec_col = np.full(len(signals_df), None, dtype=object)
 
     times   = signals_df.index
     n       = len(signals_df)
@@ -144,7 +149,8 @@ def run_event_loop(
                     strategy=strategy,
                     signal_row=signals_df.iloc[i - 1] if strategy else None,
                     risk_engine=risk_engine,
-                    tag=tag
+                    tag=tag,
+                    order_spec=ospec_col[i - 1]
                 )
 
         equity = _pv(cash, positions, cp)
@@ -195,6 +201,7 @@ def _merge_symbol_bars(symbol_signals: Dict[str, pd.DataFrame]) -> List[Tuple[pd
         signals = df["signal"].fillna(0).astype(int).values if "signal" in df.columns else np.zeros(len(df), dtype=int)
         tags = df["signal_tag"].fillna("").astype(str).values if "signal_tag" in df.columns else np.full(len(df), "", dtype=object)
         gtts = df["gtt_orders"].values if "gtt_orders" in df.columns else np.full(len(df), None, dtype=object)
+        ospecs = df["order_spec"].values if "order_spec" in df.columns else np.full(len(df), None, dtype=object)
         
         n = len(df)
         atr_vals = _compute_atr14(closes, highs, lows, n)
@@ -216,6 +223,8 @@ def _merge_symbol_bars(symbol_signals: Dict[str, pd.DataFrame]) -> List[Tuple[pd
                     "prev_row": df.iloc[i-1] if i > 0 else None,
                     "tag": tags[i],
                     "gtt": gtts[i],
+                    "ospec": ospecs[i],
+                    "prev_ospec": ospecs[i-1] if i > 0 else None,
                     "atr": float(atr_vals[i]) if (atr_vals is not None and not np.isnan(atr_vals[i])) else None,
                     "high_series": highs[:i+1],
                     "low_series": lows[:i+1]
@@ -309,7 +318,8 @@ def run_event_loop_portfolio(
                     positions=pos_list, pending=pend_list, trade_log=trade_log,
                     filler=filler, cfg=cfg, symbol=sym,
                     strategy=None, signal_row=data["prev_row"],
-                    risk_engine=risk_engine, tag=tag
+                    risk_engine=risk_engine, tag=tag,
+                    order_spec=data["prev_ospec"]
                 )
                 
         positions_by_symbol[sym] = pos_list
@@ -384,6 +394,7 @@ def _handle_signal(
     signal_row: Optional[Any] = None,
     risk_engine: Optional[RiskEngine] = None,
     tag:        str = "Market Signal",
+    order_spec: Optional[OrderSpec] = None,
 ) -> Tuple[float, List[Position], List[PendingOrder], List[Trade]]:
     ot = cfg.default_order_type
 
@@ -432,6 +443,19 @@ def _handle_signal(
             row     = signal_row,
         )
 
+    if order_spec is not None:
+        try:
+            order_spec.validate()
+        except Exception as e:
+            logger.error(f"Invalid OrderSpec dropped: {e}")
+            return cash, positions, pending, trade_log
+            
+        ot = order_spec.order_type
+        stop_price = order_spec.sl_spec.compute_initial_stop(exec_price, signal, atr)
+        if order_spec.quantity > 0:
+            custom_qty = order_spec.quantity
+        tag = order_spec.tag or tag
+
     if ot == OrderType.MARKET:
         if custom_qty is not None and custom_qty > 0:
             order_side = "BUY" if signal == 1 else "SELL"
@@ -453,6 +477,10 @@ def _handle_signal(
                     stop_price    = stop_price,
                     order_type    = OrderType.MARKET,
                 )
+                if order_spec is not None:
+                    pos.sl_spec = order_spec.sl_spec
+                    pos.tp_spec = order_spec.tp_spec
+                    pos.target_price = order_spec.tp_spec.compute_target(exec_price, signal, None, atr)
                 cash -= total_cost
                 positions.append(pos)
         else:
@@ -462,6 +490,10 @@ def _handle_signal(
                 entry_signal=tag, atr=atr, stop_price=stop_price,
             )
             if pos:
+                if order_spec is not None:
+                    pos.sl_spec = order_spec.sl_spec
+                    pos.tp_spec = order_spec.tp_spec
+                    pos.target_price = order_spec.tp_spec.compute_target(exec_price, signal, None, atr)
                 positions.append(pos)
 
     else:
@@ -471,27 +503,52 @@ def _handle_signal(
             cfg.fixed_quantity, stop_price, atr, cfg.stop_loss_atr_mult, cfg.lot_size
         )
         if qty > 0:
+            expires = order_spec.expires_after if order_spec else 0
+            amo_flag = order_spec.amo if order_spec else False
+            sl_s = order_spec.sl_spec if order_spec else StopLossSpec()
+            tp_s = order_spec.tp_spec if order_spec else TakeProfitSpec()
+            
             if ot == OrderType.LIMIT:
-                lp = prev_close * (1.0 - pct) if signal == 1 else prev_close * (1.0 + pct)
+                lp = order_spec.limit_price if (order_spec and order_spec.limit_price) else (prev_close * (1.0 - pct) if signal == 1 else prev_close * (1.0 + pct))
                 pending.append(PendingOrder(
                     direction=signal, order_type=OrderType.LIMIT,
                     quantity=qty, signal_bar=bar_idx, limit_price=lp,
+                    expires_after=expires, amo=amo_flag, sl_spec=sl_s, tp_spec=tp_s, tag=tag
                 ))
 
             elif ot == OrderType.STOP:
-                sp = prev_close * (1.0 + pct) if signal == 1 else prev_close * (1.0 - pct)
+                sp = order_spec.stop_trigger if (order_spec and order_spec.stop_trigger) else (prev_close * (1.0 + pct) if signal == 1 else prev_close * (1.0 - pct))
                 pending.append(PendingOrder(
                     direction=signal, order_type=OrderType.STOP,
                     quantity=qty, signal_bar=bar_idx, stop_price=sp,
+                    expires_after=expires, amo=amo_flag, sl_spec=sl_s, tp_spec=tp_s, tag=tag
                 ))
 
             elif ot == OrderType.STOP_LIMIT:
-                sp  = prev_close * (1.0 + pct) if signal == 1 else prev_close * (1.0 - pct)
-                lim = sp * (1.0 + pct) if signal == 1 else sp * (1.0 - pct)
+                sp = order_spec.stop_trigger if (order_spec and order_spec.stop_trigger) else (prev_close * (1.0 + pct) if signal == 1 else prev_close * (1.0 - pct))
+                lim = order_spec.limit_price if (order_spec and order_spec.limit_price) else (sp * (1.0 + pct) if signal == 1 else sp * (1.0 - pct))
                 pending.append(PendingOrder(
                     direction=signal, order_type=OrderType.STOP_LIMIT,
                     quantity=qty, signal_bar=bar_idx,
                     stop_price=sp, limit_price=lim,
+                    expires_after=expires, amo=amo_flag, sl_spec=sl_s, tp_spec=tp_s, tag=tag
+                ))
+            
+            elif ot == OrderType.BRACKET or ot == OrderType.COVER:
+                sp = order_spec.stop_trigger if (order_spec and order_spec.stop_trigger) else None
+                lim = order_spec.limit_price if (order_spec and order_spec.limit_price) else None
+                pending.append(PendingOrder(
+                    direction=signal, order_type=ot,
+                    quantity=qty, signal_bar=bar_idx,
+                    stop_price=sp, limit_price=lim,
+                    expires_after=expires, amo=amo_flag, sl_spec=sl_s, tp_spec=tp_s, tag=tag
+                ))
+            
+            elif ot == OrderType.AMO:
+                pending.append(PendingOrder(
+                    direction=signal, order_type=OrderType.AMO,
+                    quantity=qty, signal_bar=bar_idx,
+                    expires_after=expires, amo=True, sl_spec=sl_s, tp_spec=tp_s, tag=tag
                 ))
 
     return cash, positions, pending, trade_log

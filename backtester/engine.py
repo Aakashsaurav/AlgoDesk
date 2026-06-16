@@ -46,6 +46,7 @@ class BacktestEngine:
         feed = self._coerce_feed(df, symbol=symbol)
         symbol = feed.symbol
         self._preflight(feed.data)
+        feed_df = self._inject_benchmark(feed.df, strategy)
         
         strategy_name = getattr(strategy, 'name', strategy.__class__.__name__)
         logger.info(
@@ -54,7 +55,7 @@ class BacktestEngine:
             f"order={self.config.default_order_type.value}"
         )
 
-        signals_df = strategy.generate_signals(feed.df)
+        signals_df = strategy.generate_signals(feed_df)
         if "signal" not in signals_df.columns:
             raise ValueError(
                 f"strategy.generate_signals() must return a DataFrame with a "
@@ -103,7 +104,8 @@ class BacktestEngine:
         def process_symbol(sym, df_in):
             feed = self._coerce_feed(df_in, symbol=sym)
             self._preflight(feed.data)
-            sig_df = strategy.generate_signals(feed.df)
+            feed_df = self._inject_benchmark(feed.df, strategy)
+            sig_df = strategy.generate_signals(feed_df)
             if "signal" not in sig_df.columns:
                 logger.warning(f"{feed.symbol}: no 'signal' column — skipped")
                 return sym, None
@@ -185,6 +187,46 @@ class BacktestEngine:
                     logger.error(f"  {sym}: ERROR — {exc}", exc_info=True)
 
             return results
+
+    def _inject_benchmark(self, df: pd.DataFrame, strategy: Any) -> pd.DataFrame:
+        req_cols = getattr(strategy, "REQUIRED_EXTRA_COLUMNS", [])
+        if "benchmark_close" in req_cols and "benchmark_close" not in df.columns:
+            logger.info("Injecting benchmark data (Nifty 50) for strategy requirement...")
+            try:
+                from broker.upstox.data_manager import get_ohlcv
+                if df.empty:
+                    return df
+                
+                # Fetch daily Nifty 50 to forward fill into the target dataframe
+                start_str = df.index.min().strftime('%Y-%m-%d')
+                end_str = df.index.max().strftime('%Y-%m-%d')
+                
+                bench_df = get_ohlcv(
+                    instrument_type="INDEX",
+                    exchange="NSE",
+                    trading_symbol="Nifty 50",
+                    unit="days",
+                    interval=1,
+                    from_date=start_str,
+                    to_date=end_str
+                )
+                
+                if not bench_df.empty:
+                    # To allow ffill across intraday timestamps, align by day
+                    # then ffill to all timestamps in df
+                    bench_close = bench_df['close'].copy()
+                    bench_close.index = bench_close.index.normalize()
+                    
+                    df_dates = df.index.normalize()
+                    # Map the daily close to the original dataframe timestamps
+                    df['benchmark_close'] = df_dates.map(bench_close)
+                    # Forward fill any missing intra-day or starting gaps
+                    df['benchmark_close'] = df['benchmark_close'].ffill().bfill()
+                else:
+                    logger.warning("Could not fetch benchmark data.")
+            except Exception as e:
+                logger.warning(f"Failed to inject benchmark data: {e}")
+        return df
 
     @staticmethod
     def _preflight(df: pd.DataFrame) -> None:
