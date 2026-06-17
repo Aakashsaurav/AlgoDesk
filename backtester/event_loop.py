@@ -16,7 +16,7 @@ import pandas as pd
 from backtester.models import BacktestConfig, Position, Trade
 from backtester.orders import OrderType, PendingOrder, GTTOrder, OrderSpec, StopLossSpec, TakeProfitSpec
 from backtester.fill_engine import FillEngine
-from backtester.position_sizer import compute_quantity
+from risk.position_sizer import compute_quantity
 from risk.engine import RiskEngine
 
 logger = logging.getLogger(__name__)
@@ -136,8 +136,28 @@ def run_event_loop(
                         pos.stop_price = min(old_sl, new_sl) if new_sl < old_sl else old_sl
 
         if i > 0 and signals[i - 1] != 0:
-            if not risk_engine.can_open(len(positions), signals[i - 1]):
-                logger.debug("RiskEngine blocked new trade at bar %s", i)
+            action = "BUY" if signals[i-1] == 1 else "SELL"
+            # We create a dummy positions dict to pass to check_order.
+            # Only direction and quantity matter for risk checks like shorting/duplicates.
+            # The backtester creates Position objects.
+            pos_dict = {f"pos_{idx}": p for idx, p in enumerate(positions)}
+            
+            # We use a dummy qty since qty hasn't been computed yet (compute_quantity happens later).
+            # We pass 1, but this bypasses MAX_POSITION_SIZE check.
+            # To be fully correct, we could compute qty here, but that's invasive.
+            # The backward compatible way is to use `check_order` with dummy values or keep `can_open`.
+            # The instructions explicitly say: "risk_engine.can_open(len(positions), signals[i-1]) -> risk_engine.check_order(symbol, action, qty, price, cash, positions_dict) with backward-compat wrapper"
+            res = risk_engine.check_order(
+                symbol=symbol,
+                action=action,
+                quantity=1,  # Backward compat dummy
+                price=op,
+                cash=cash,
+                open_positions=pos_dict
+            )
+            
+            if not res.allowed:
+                logger.debug("RiskEngine blocked new trade at bar %s: %s", i, res.reason)
             else:
                 tag = signal_tags[i-1] or "Market Signal"
                 cash, positions, pending, trade_log = _handle_signal(

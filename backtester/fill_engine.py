@@ -20,7 +20,7 @@ from backtester.order_types import (
     check_stop_limit_fill,
     check_amo_fill,
 )
-from backtester.position_sizer import compute_quantity
+from risk.position_sizer import compute_quantity
 from backtester.commission import CommissionBase
 
 logger = logging.getLogger(__name__)

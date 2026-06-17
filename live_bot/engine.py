@@ -79,7 +79,7 @@ from live_bot.state import state as live_state
 from live_bot.candle_builder import candle_registry
 from live_bot.feeds.market_feed import BaseMarketFeed, MarketFeed, RestMarketFeed
 from live_bot.feeds.portfolio_feed import PortfolioFeed
-from live_bot.risk.risk_guard import RiskGuard
+from risk import LiveRiskGuard, RiskConfig
 from live_bot.orders.paper_broker import PaperBroker
 from strategies.base import BaseStrategy, Action, Signal
 
@@ -158,13 +158,16 @@ class LiveBotEngine:
         else:
             # backwards compatibility: if a single positional arg was supplied
             self._strategy = bot_config.strategy_class(params)
-        self._risk     = RiskGuard(
-            daily_loss_limit_pct = bot_config.daily_loss_limit_pct,
-            max_drawdown_pct     = bot_config.max_drawdown_pct,
-            max_open_positions   = bot_config.max_open_positions,
-            max_position_pct     = bot_config.max_position_pct,
-            allow_short          = bot_config.allow_short,
+        
+        risk_config = RiskConfig(
+            initial_capital=bot_config.initial_capital,
+            max_daily_loss_pct=bot_config.daily_loss_limit_pct,
+            max_drawdown_pct=bot_config.max_drawdown_pct,
+            max_positions=bot_config.max_open_positions,
+            max_position_size_pct=bot_config.max_position_pct,
+            allow_shorting=bot_config.allow_short
         )
+        self._risk = LiveRiskGuard(config=risk_config)
         # Choose broker implementation depending on mode
         if config.PAPER_TRADE:
             from live_bot.orders.paper_broker import PaperBroker
@@ -654,9 +657,9 @@ class LiveBotEngine:
         # ── BUY signal ────────────────────────────────────────────────────────
         if signal_value == 1 and not live_state.has_position(symbol):
             qty = self._risk.compute_position_size(ltp, stop_loss)
-            allowed, reason = self._risk.check_order(symbol, "BUY", qty, ltp)
+            res = self._risk.check_order(symbol, "BUY", qty, ltp, live_state.cash, live_state.get_all_positions())
 
-            if allowed:
+            if res.allowed:
                 self._broker.place_order(
                     symbol         = symbol,
                     instrument_key = instrument_key,
@@ -667,18 +670,18 @@ class LiveBotEngine:
                     take_profit    = take_profit,
                     strategy_tag   = signal_tag,
                 )
-                logger.info(f"[Risk/Audit] {symbol} BUY Order Placed | Strategy: {self._strategy.__class__.__name__} | Tag: {signal_tag} | Reason: {reason}")
+                logger.info(f"[Risk/Audit] {symbol} BUY Order Placed | Strategy: {self._strategy.__class__.__name__} | Tag: {signal_tag} | Reason: {res.reason}")
             else:
-                logger.info(f"[StrategyThread] {symbol} BUY blocked: {reason}")
+                logger.info(f"[StrategyThread] {symbol} BUY blocked: {res.reason}")
 
         # ── SELL signal (exit long) ───────────────────────────────────────────
         elif signal_value == -1 and live_state.has_position(symbol):
             position = live_state.get_position(symbol)
             if position and position.direction > 0:
-                allowed, reason = self._risk.check_order(
-                    symbol, "SELL", position.quantity, ltp
+                res = self._risk.check_order(
+                    symbol, "SELL", position.quantity, ltp, live_state.cash, live_state.get_all_positions()
                 )
-                if allowed:
+                if res.allowed:
                     self._broker.place_order(
                         symbol         = symbol,
                         instrument_key = instrument_key,
@@ -687,15 +690,15 @@ class LiveBotEngine:
                         order_type     = order_type_str,
                         strategy_tag   = signal_tag,
                     )
-                    logger.info(f"[Risk/Audit] {symbol} SELL Order Placed | Strategy: {self._strategy.__class__.__name__} | Tag: {signal_tag} | Reason: {reason}")
+                    logger.info(f"[Risk/Audit] {symbol} SELL Order Placed | Strategy: {self._strategy.__class__.__name__} | Tag: {signal_tag} | Reason: {res.reason}")
                 else:
-                    logger.warning(f"[StrategyThread] {symbol} SELL blocked: {reason}")
+                    logger.warning(f"[StrategyThread] {symbol} SELL blocked: {res.reason}")
 
         # ── SHORT signal ──────────────────────────────────────────────────────
         elif signal_value == -1 and not live_state.has_position(symbol) and cfg.allow_short:
             qty = self._risk.compute_position_size(ltp, stop_loss)
-            allowed, reason = self._risk.check_order(symbol, "SHORT", qty, ltp)
-            if allowed:
+            res = self._risk.check_order(symbol, "SHORT", qty, ltp, live_state.cash, live_state.get_all_positions())
+            if res.allowed:
                 self._broker.place_order(
                     symbol         = symbol,
                     instrument_key = instrument_key,
@@ -706,7 +709,7 @@ class LiveBotEngine:
                     take_profit    = take_profit,
                     strategy_tag   = signal_tag,
                 )
-                logger.info(f"[Risk/Audit] {symbol} SHORT Order Placed | Strategy: {self._strategy.__class__.__name__} | Tag: {signal_tag} | Reason: {reason}")
+                logger.info(f"[Risk/Audit] {symbol} SHORT Order Placed | Strategy: {self._strategy.__class__.__name__} | Tag: {signal_tag} | Reason: {res.reason}")
 
     def _check_all_sl_tp(self) -> None:
         """Check stop-loss and take-profit for all open positions."""
