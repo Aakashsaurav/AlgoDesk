@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from backtester.models import BacktestConfig, Position, Trade
-from backtester.orders import OrderType, PendingOrder, GTTOrder, OrderSpec
+from backtester.orders import OrderType, PendingOrder, GTTOrder, OrderSpec, StopLossSpec, TakeProfitSpec
 from backtester.fill_engine import FillEngine
 from backtester.position_sizer import compute_quantity
 from risk.engine import RiskEngine

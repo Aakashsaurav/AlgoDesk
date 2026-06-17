@@ -94,6 +94,24 @@ class EMACrossoverStrategy(BaseStrategy):
         df.loc[sig == 1, "signal_tag"] = "EMA_CROSS_UP_ENTRY" if mode != "short_only" else "EMA_CROSS_UP_COVER"
         df.loc[sig == -1, "signal_tag"] = "EMA_CROSS_DOWN_ENTRY" if mode != "long_only" else "EMA_CROSS_DOWN_EXIT"
 
+        sl_pct = float(self.params["sl_pct"])
+        tp_pct = float(self.params["tp_pct"])
+
+        if sl_pct > 0 or tp_pct > 0:
+            from backtester.orders import OrderSpec, StopLossSpec, TakeProfitSpec, StopLossType, TakeProfitType
+            sl_spec = StopLossSpec(sl_type=StopLossType.FIXED_PCT, value=sl_pct) if sl_pct > 0 else StopLossSpec()
+            tp_spec = TakeProfitSpec(tp_type=TakeProfitType.FIXED_PCT, value=tp_pct) if tp_pct > 0 else TakeProfitSpec()
+
+            df["order_spec"] = None
+            
+            entry_long = (sig == 1) & (df["signal_tag"] == "EMA_CROSS_UP_ENTRY")
+            if entry_long.any():
+                df.loc[entry_long, "order_spec"] = [OrderSpec(direction=1, sl_spec=sl_spec, tp_spec=tp_spec, tag="EMA_CROSS_UP_ENTRY")] * entry_long.sum()
+                
+            entry_short = (sig == -1) & (df["signal_tag"] == "EMA_CROSS_DOWN_ENTRY")
+            if entry_short.any():
+                df.loc[entry_short, "order_spec"] = [OrderSpec(direction=-1, sl_spec=sl_spec, tp_spec=tp_spec, tag="EMA_CROSS_DOWN_ENTRY")] * entry_short.sum()
+
         return self._finalize_signals(df)
 
 
