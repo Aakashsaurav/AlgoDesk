@@ -30,6 +30,7 @@ class StrategyRule(ScreenRule):
         
         self.name = f"StrategyRule_{self.strategy_name}_{self.signal_type}"
         self.description = f"Checks if {self.strategy_name} generated a {self.signal_type} signal."
+        self.min_bars_required = getattr(self.strategy_class, "MIN_WARMUP_BARS", 1)
         
     def evaluate(self, df: pd.DataFrame) -> RuleResult:
         try:
@@ -116,6 +117,7 @@ class StrategyConfluenceRule(ScreenRule):
         
         self.name = f"StrategyConfluence_{self.n_required}_{len(strategies)}"
         self.description = f"Requires {self.n_required} out of {len(strategies)} strategies to pass."
+        self.min_bars_required = max((r.min_bars_required for r in strategies), default=1)
 
     def evaluate(self, df: pd.DataFrame) -> RuleResult:
         passed_count = 0

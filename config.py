@@ -137,6 +137,9 @@ class AppConfig:
     OHLCV_DIR:   Path = DATA_DIR / "ohlcv"
     SQLITE_DIR:  Path = DATA_DIR / "sqlite"
     LIVE_TICK_DIR: Path = DATA_DIR / "live_ticks"
+    LIVE_CANDLE_DIR: Path = DATA_DIR / "live_candles"
+    LIVE_SESSION_DB: Path = SQLITE_DIR / "live_sessions.db"
+    LIVE_BOT_OUTPUT_DIR: Path = BASE_DIR / "live_bot" / "output"
     UNIVERSE_DIR: Path = DATA_DIR / "universes"
     CUSTOM_INDICATOR: Path = BASE_DIR / "indicators" / "custom_indicators.db"
 
@@ -201,7 +204,8 @@ class AppConfig:
         """Ensure all required directories exist at startup."""
         for d in (
             self.DATA_DIR, self.OHLCV_DIR, self.SQLITE_DIR,
-            self.LIVE_TICK_DIR, self.UNIVERSE_DIR,
+            self.LIVE_TICK_DIR, self.LIVE_CANDLE_DIR,
+            self.LIVE_BOT_OUTPUT_DIR, self.UNIVERSE_DIR,
             self.SCREENER_OUTPUT_DIR,
             self.BACKTESTER_OUTPUT_DIR, self.BACKTESTER_TRADE_DIR,
             self.BACKTESTER_CHART_DIR, self.BACKTESTER_REPORT_DIR,

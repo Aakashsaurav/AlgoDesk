@@ -8,6 +8,7 @@ import pandas as pd
 
 from screener.base import RuleResult, SignalDirection
 from screener.rules.base import ScreenRule
+from indicators.patterns.candlestick import __all__ as candlestick_patterns
 
 
 class CandlePatternRule(ScreenRule):
@@ -20,10 +21,8 @@ class CandlePatternRule(ScreenRule):
         self.weight = 1.0
         
         # Verify pattern exists
-        from indicators.patterns.candlestick import __all__ as candlestick_patterns
         if pattern_name not in candlestick_patterns and pattern_name != "scan_all_candlestick":
-            import logging
-            logging.getLogger(__name__).warning(f"Pattern {pattern_name} not found in indicators.patterns.candlestick")
+            raise ValueError(f"Pattern {pattern_name} not found in indicators.patterns.candlestick")
 
     def evaluate(self, df: pd.DataFrame) -> RuleResult:
         import importlib

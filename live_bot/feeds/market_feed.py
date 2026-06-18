@@ -43,7 +43,7 @@ except ImportError:  # pragma: no cover - dependency optional in tests
 
 from config import config, IST
 from live_bot.candle_builder import candle_registry
-from live_bot.storage import LiveMarketDataStorage, live_data_storage
+
 from live_bot.state import TickData, state as live_state
 
 logger = logging.getLogger(__name__)
@@ -183,7 +183,7 @@ def _parse_message(message: dict) -> List[TickData]:
 def _dispatch_tick(
     tick: TickData,
     on_candle_complete: Optional[Callable[[str, dict], None]],
-    data_storage: Optional[LiveMarketDataStorage],
+    data_storage=None,
 ) -> None:
     """Push one tick through state, persistence, candle-building, and callbacks."""
     live_state.update_tick(tick.symbol, tick)
@@ -296,7 +296,7 @@ class MarketFeed(BaseMarketFeed):
         mode: str = "full",
         auto_reconnect_interval: int = 5,
         auto_reconnect_retries: int = 50,
-        data_storage: Optional[LiveMarketDataStorage] = live_data_storage,
+        data_storage=None,
     ) -> None:
         self._access_token = access_token
         self._instrument_map = instrument_map
@@ -470,7 +470,7 @@ class RestMarketFeed(BaseMarketFeed):
         batch_size: int = DEFAULT_REST_BATCH_SIZE,
         timeout_seconds: float = 10.0,
         max_consecutive_failures: int = 5,
-        data_storage: Optional[LiveMarketDataStorage] = live_data_storage,
+        data_storage=None,
         session: Optional[Any] = None,
     ) -> None:
         if poll_interval_seconds <= 0:

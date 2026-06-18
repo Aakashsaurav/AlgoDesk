@@ -324,19 +324,19 @@ class ADXRule(ScreenRule):
     def evaluate(self, df: pd.DataFrame) -> RuleResult:
         adx_df = _engine.compute("adx", df["high"], df["low"], df["close"], period=self.period)
         val = adx_df["adx"].iloc[-1]
-        di_plus = adx_df["di_plus"].iloc[-1]
-        di_minus = adx_df["di_minus"].iloc[-1]
+        plus_di = adx_df["plus_di"].iloc[-1]
+        minus_di = adx_df["minus_di"].iloc[-1]
 
         if self.condition == "above":
             passed = val > self.threshold
         elif self.condition == "di_plus_above":
-            passed = val > self.threshold and di_plus > di_minus
+            passed = val > self.threshold and plus_di > minus_di
         elif self.condition == "di_minus_above":
-            passed = val > self.threshold and di_minus > di_plus
+            passed = val > self.threshold and minus_di > plus_di
         else:
             passed = False
 
-        return RuleResult(self.name, passed, float(val), self.threshold, {"di_plus": float(di_plus), "di_minus": float(di_minus)}, self.weight)
+        return RuleResult(self.name, passed, float(val), self.threshold, {"plus_di": float(plus_di), "minus_di": float(minus_di)}, self.weight)
 
     def to_dict(self) -> dict:
         return {"type": "ADXRule", "period": self.period, "threshold": self.threshold, "condition": self.condition}
@@ -358,6 +358,14 @@ class VWAPRule(ScreenRule):
         # Check if intraday by index
         if not pd.api.types.is_datetime64_any_dtype(df.index):
             return RuleResult(self.name, False, None, None, {"error": "VWAP requires datetime index"}, self.weight)
+        
+        if len(df) > 1:
+            time_diff = df.index.to_series().diff().median()
+            if time_diff >= pd.Timedelta(days=1):
+                import logging
+                logging.getLogger(__name__).warning(
+                    "VWAPRule used on daily data: VWAP will reset each day, treating each day as a separate session."
+                )
         
         # Calculate session VWAP
         v = df['volume']

@@ -47,6 +47,10 @@ class PreFilter:
     required_columns: list[str] = field(default_factory=lambda: ["open", "high", "low", "close", "volume"])
 
     def apply(self, symbol: str, df: pd.DataFrame) -> tuple[bool, str]:
+        missing_cols = [c for c in self.required_columns if c not in df.columns]
+        if missing_cols:
+            return False, f"Missing required columns {missing_cols}"
+            
         if len(df) < self.min_bars:
             return False, f"Insufficient bars: {len(df)} < {self.min_bars}"
             

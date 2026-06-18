@@ -115,11 +115,20 @@ def _verify_webhook_signature(body_bytes: bytes, provided_sig: str) -> bool:
 
     Uses ``hmac.compare_digest`` for constant-time comparison to prevent
     timing-based attacks.
+    Client must send lowercase hex HMAC-SHA256 digest.
     """
     if not _WEBHOOK_SECRET:
         return True  # No secret configured — skip check (migration mode)
     if not provided_sig:
         return False
+        
+    try:
+        int(provided_sig, 16)
+    except ValueError:
+        return False
+        
+    provided_sig = provided_sig.lower()
+    
     expected = hmac.new(
         _WEBHOOK_SECRET.encode(), body_bytes, hashlib.sha256
     ).hexdigest()

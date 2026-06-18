@@ -65,7 +65,9 @@ def _get_state():
     return _state_module.state
 
 
-class LiveBroker:
+from live_bot.orders.base import BrokerInterface
+
+class LiveBroker(BrokerInterface):
     """
     Routes orders to Upstox using their V3 Order API.
 
@@ -183,7 +185,7 @@ class LiveBroker:
     # Compatibility stubs
     # ------------------------------------------------------------------
 
-    def check_pending_orders(self, symbol: str) -> None:
+    def check_pending_limit_orders(self, symbol: str) -> None:
         """
         No-op in live mode. Upstox handles pending/limit orders server-side.
 
@@ -203,79 +205,49 @@ class LiveBroker:
     # Squareoff
     # ------------------------------------------------------------------
 
+    def _squareoff_one(self, item) -> tuple[str, bool]:
+        symbol, position = item
+        try:
+            exit_action = "SELL" if position.direction > 0 else "COVER"
+            order = self.place_order(
+                symbol=symbol,
+                instrument_key=position.instrument_key,
+                action=exit_action,
+                quantity=position.quantity,
+                order_type="MARKET",
+                strategy_tag=position.strategy_tag or "SQUAREOFF",
+            )
+            if order is None:
+                logger.error("[LiveBroker] squareoff_all: failed to place exit order for %s.", symbol)
+                return symbol, False
+            logger.info("[LiveBroker] squareoff_all: exit order sent for %s | %s x%d", symbol, exit_action, position.quantity)
+            return symbol, True
+        except Exception as exc:
+            logger.error("[LiveBroker] squareoff_all: exception while exiting %s: %s", symbol, exc, exc_info=True)
+            return symbol, False
+
     def squareoff_all(self) -> None:
-        """
-        Close all open positions at market.
-
-        This implementation uses the current in-memory live state as the
-        source of truth for open positions and submits opposing MARKET
-        orders for each one.
-
-        It intentionally does not mark positions closed locally here.
-        Final status must come from the portfolio/order update path after
-        Upstox acknowledges and fills the exit orders.
-
-        ── How to implement this for production ──────────────────────────
-        A correct live squareoff for intraday MIS positions requires:
-          1. Cancel all open/pending orders for each symbol.
-          2. Read current net position from PortfolioFeed or Upstox REST.
-          3. Place an opposing MARKET order for the net quantity.
-          4. Confirm fills via PortfolioFeed order-update events.
-          5. Retry or alert if any fill is not confirmed within ~30 s.
-
-        Implement, test thoroughly on paper mode, and paper-trade for at
-        least one full week before enabling on a live account.
-        """
         positions = _get_state().get_all_positions()
         if not positions:
             logger.info("[LiveBroker] squareoff_all: no open positions.")
             return
 
-        logger.warning(
-            "[LiveBroker] squareoff_all: attempting market exit for %d position(s): %s",
-            len(positions),
-            ", ".join(sorted(positions.keys())),
-        )
+        logger.warning("[LiveBroker] squareoff_all: attempting market exit for %d position(s)", len(positions))
 
-        failures: list[str] = []
-
-        for symbol, position in positions.items():
-            try:
-                exit_action = "SELL" if position.direction > 0 else "COVER"
-                order = self.place_order(
-                    symbol=symbol,
-                    instrument_key=position.instrument_key,
-                    action=exit_action,
-                    quantity=position.quantity,
-                    order_type="MARKET",
-                    strategy_tag=position.strategy_tag or "SQUAREOFF",
-                )
-                if order is None:
-                    failures.append(symbol)
-                    logger.error(
-                        "[LiveBroker] squareoff_all: failed to place exit order for %s.",
-                        symbol,
-                    )
-                else:
-                    logger.info(
-                        "[LiveBroker] squareoff_all: exit order sent for %s | %s x%d",
-                        symbol,
-                        exit_action,
-                        position.quantity,
-                    )
-            except Exception as exc:
-                failures.append(symbol)
-                logger.error(
-                    "[LiveBroker] squareoff_all: exception while exiting %s: %s",
-                    symbol,
-                    exc,
-                    exc_info=True,
-                )
-
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(10, len(positions))) as ex:
+            results = list(ex.map(self._squareoff_one, positions.items()))
+            
+        failures = [s for s, ok in results if not ok]
         if failures:
-            msg = (
-                "[LiveBroker] squareoff_all incomplete. Exit order placement failed for: "
-                + ", ".join(sorted(failures))
-            )
+            msg = "[LiveBroker] squareoff_all incomplete. Exit order placement failed for: " + ", ".join(sorted(failures))
             logger.critical(msg)
             raise RuntimeError(msg)
+
+
+    def place_gtt_order(self, trigger_price: float, quantity: int, limit_price: float, stop_loss: float) -> str:
+        raise NotImplementedError("GTT order placement roadmap note")
+
+    @property
+    def is_paper(self) -> bool:
+        return False

@@ -67,6 +67,7 @@ from screener.rules.technical import RSIRule, MACDRule, EMARule, GoldenCrossRule
 from screener.rules.price import PriceBreakoutRule, NearSupportRule, NearResistanceRule, PriceRangeRule, HigherHighRule, LowerLowRule
 from screener.rules.volume import VolumeBreakoutRule, VolumeDeclineRule, VolumeRatioRule, AccumulationRule, DistributionRule
 from screener.rules.pattern import CandlePatternRule, ChartPatternRule, TrendStructureRule
+from screener.rules.strategy import StrategyRule, StrategyConfluenceRule
 
 for rule_class in [
     AndRule, OrRule, NotRule, AtLeastNRule,
@@ -74,6 +75,7 @@ for rule_class in [
     SupertrendRule, BollingerSqueezeRule, RelativeStrengthRule, ADXRule, VWAPRule,
     PriceBreakoutRule, NearSupportRule, NearResistanceRule, PriceRangeRule, HigherHighRule, LowerLowRule,
     VolumeBreakoutRule, VolumeDeclineRule, VolumeRatioRule, AccumulationRule, DistributionRule,
-    CandlePatternRule, ChartPatternRule, TrendStructureRule
+    CandlePatternRule, ChartPatternRule, TrendStructureRule,
+    StrategyRule, StrategyConfluenceRule
 ]:
     RuleSerializer.register_rule(rule_class)

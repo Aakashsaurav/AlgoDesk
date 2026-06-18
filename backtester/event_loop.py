@@ -59,6 +59,8 @@ def run_event_loop(
     times   = signals_df.index
     n       = len(signals_df)
 
+    signal_rows_list = signals_df.to_dict('records') if strategy else []
+
     atr_vals = _compute_atr14(closes, highs, lows, n)
 
     cash:      float                = cfg.initial_capital
@@ -137,20 +139,12 @@ def run_event_loop(
 
         if i > 0 and signals[i - 1] != 0:
             action = "BUY" if signals[i-1] == 1 else "SELL"
-            # We create a dummy positions dict to pass to check_order.
-            # Only direction and quantity matter for risk checks like shorting/duplicates.
-            # The backtester creates Position objects.
             pos_dict = {f"pos_{idx}": p for idx, p in enumerate(positions)}
             
-            # We use a dummy qty since qty hasn't been computed yet (compute_quantity happens later).
-            # We pass 1, but this bypasses MAX_POSITION_SIZE check.
-            # To be fully correct, we could compute qty here, but that's invasive.
-            # The backward compatible way is to use `check_order` with dummy values or keep `can_open`.
-            # The instructions explicitly say: "risk_engine.can_open(len(positions), signals[i-1]) -> risk_engine.check_order(symbol, action, qty, price, cash, positions_dict) with backward-compat wrapper"
             res = risk_engine.check_order(
                 symbol=symbol,
                 action=action,
-                quantity=1,  # Backward compat dummy
+                quantity=1,
                 price=op,
                 cash=cash,
                 open_positions=pos_dict
@@ -167,7 +161,7 @@ def run_event_loop(
                     positions=positions, pending=pending,
                     trade_log=trade_log, filler=filler, cfg=cfg, symbol=symbol,
                     strategy=strategy,
-                    signal_row=signals_df.iloc[i - 1] if strategy else None,
+                    signal_row=signal_rows_list[i - 1] if strategy else None,
                     risk_engine=risk_engine,
                     tag=tag,
                     order_spec=ospec_col[i - 1]
@@ -213,6 +207,7 @@ def run_event_loop(
 def _merge_symbol_bars(symbol_signals: Dict[str, pd.DataFrame]) -> List[Tuple[pd.Timestamp, str, dict]]:
     events = []
     for symbol, df in symbol_signals.items():
+        rows = df.to_dict('records')
         times = df.index
         opens = df["open"].values.astype(float)
         highs = df["high"].values.astype(float)
@@ -240,7 +235,7 @@ def _merge_symbol_bars(symbol_signals: Dict[str, pd.DataFrame]) -> List[Tuple[pd
                     "prev_signal": signals[i-1] if i > 0 else 0,
                     "prev_tag": tags[i-1] if i > 0 else "",
                     "prev_close": closes[i-1] if i > 0 else 0.0,
-                    "prev_row": df.iloc[i-1] if i > 0 else None,
+                    "prev_row": rows[i-1] if i > 0 else None,
                     "tag": tags[i],
                     "gtt": gtts[i],
                     "ospec": ospecs[i],
@@ -256,28 +251,34 @@ def _merge_symbol_bars(symbol_signals: Dict[str, pd.DataFrame]) -> List[Tuple[pd
 
 
 def run_event_loop_portfolio(
-    symbol_signals: Dict[str, pd.DataFrame],
+    signals_dict: Dict[str, pd.DataFrame],
     config: BacktestConfig,
-    strategy_name: str = "",
+    strategy: Optional[Any] = None,
+    gtt_orders: Optional[List[GTTOrder]] = None,
 ) -> Tuple[List[Trade], Dict[str, pd.Series], pd.Series, pd.Series]:
     cfg = config
     filler = FillEngine(cfg)
     risk_engine = RiskEngine(cfg.risk_config)
     risk_engine.record_equity(cfg.initial_capital)
 
-    cash = cfg.initial_capital
-    positions_by_symbol: Dict[str, List[Position]] = {sym: [] for sym in symbol_signals}
-    pending_by_symbol: Dict[str, List[PendingOrder]] = {sym: [] for sym in symbol_signals}
-    gtt_by_symbol: Dict[str, List[GTTOrder]] = {sym: [] for sym in symbol_signals}
+    cash: float = cfg.initial_capital
+    positions_by_symbol: Dict[str, List[Position]] = {sym: [] for sym in signals_dict}
+    pending_by_symbol: Dict[str, List[PendingOrder]] = {sym: [] for sym in signals_dict}
+    gtt_by_symbol: Dict[str, List[GTTOrder]] = {sym: [] for sym in signals_dict}
     trade_log: List[Trade] = []
     
-    events = _merge_symbol_bars(symbol_signals)
+    if gtt_orders:
+        for go in gtt_orders:
+            if go.symbol in gtt_by_symbol:
+                gtt_by_symbol[go.symbol].append(go)
+    
+    events = _merge_symbol_bars(signals_dict)
     
     unique_times = sorted(list(set([e[0] for e in events])))
     combined_eq_dict = {t: np.nan for t in unique_times}
-    per_sym_eq_dict = {sym: {t: np.nan for t in unique_times} for sym in symbol_signals}
+    per_sym_eq_dict = {sym: {t: np.nan for t in unique_times} for sym in signals_dict}
     
-    last_close = {sym: 0.0 for sym in symbol_signals}
+    last_close = {sym: 0.0 for sym in signals_dict}
     
     peak_equity = cfg.initial_capital
     halted = False
@@ -379,7 +380,7 @@ def run_event_loop_portfolio(
     combined_dd_series = (combined_eq_series - combined_eq_series.cummax()) / combined_eq_series.cummax()
     
     per_sym_eq_series = {}
-    for sym in symbol_signals:
+    for sym in signals_dict:
         s = pd.Series(per_sym_eq_dict[sym]).ffill()
         per_sym_eq_series[sym] = s
         

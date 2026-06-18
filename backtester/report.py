@@ -135,7 +135,8 @@ def generate_report(
         _draw_trade_markers(ax_price, df, xarr, trades)
         _xticklabels(ax_price, df.index, n)
     ax_price.set_ylabel("Price (₹)", color=TEXT, fontsize=9)
-    seg  = cfg.segment.value.upper() if cfg else ""
+    seg_val = cfg.segment if isinstance(cfg.segment, str) else cfg.segment.value if cfg else ""
+    seg  = seg_val.upper() if seg_val else ""
     ax_price.set_title(
         f"{symbol}  ·  {seg}  ·  AlgoDesk Backtester",
         color=TEXT, fontsize=11, fontweight="bold", pad=8,
@@ -200,16 +201,18 @@ def generate_html_report(
     if len(df) > max_candles:
         df = df.iloc[-max_candles:]
     
-    candles_data = []
     if not df.empty:
-        for idx, row in df.iterrows():
-            candles_data.append({
-                "time": int(pd.Timestamp(idx).timestamp()),
-                "open": row["open"],
-                "high": row["high"],
-                "low": row["low"],
-                "close": row["close"],
-            })
+        times = (df.index.astype(int) // 10**9).values
+        opens = df["open"].values
+        highs = df["high"].values
+        lows = df["low"].values
+        closes = df["close"].values
+        candles_data = [
+            {"time": int(t), "open": float(o), "high": float(h), "low": float(l), "close": float(c)}
+            for t, o, h, l, c in zip(times, opens, highs, lows, closes)
+        ]
+    else:
+        candles_data = []
             
     markers = []
     for t in result.trade_log:
@@ -335,12 +338,12 @@ def generate_html_report(
         const candleSeries = priceChart.addCandlestickSeries({{
             upColor: '#26a641', downColor: '#e3342f', borderVisible: false, wickUpColor: '#26a641', wickDownColor: '#e3342f'
         }});
-        candleSeries.setData({json.dumps(candles_data)});
-        candleSeries.setMarkers({json.dumps(markers)});
+        candleSeries.setData(__CANDLES_DATA__);
+        candleSeries.setMarkers(__MARKERS_DATA__);
         
         const equityChart = LightweightCharts.createChart(document.getElementById('equity-chart'), chartOptions);
         const equitySeries = equityChart.addLineSeries({{ color: '#58a6ff', lineWidth: 2 }});
-        equitySeries.setData({json.dumps(equity_data)});
+        equitySeries.setData(__EQUITY_DATA__);
         
         priceChart.timeScale().fitContent();
         equityChart.timeScale().fitContent();
@@ -348,6 +351,9 @@ def generate_html_report(
 </body>
 </html>
 """
+    html = html.replace("__CANDLES_DATA__", json.dumps(candles_data))
+    html = html.replace("__MARKERS_DATA__", json.dumps(markers))
+    html = html.replace("__EQUITY_DATA__", json.dumps(equity_data))
     output_path.write_text(html, encoding="utf-8")
     return output_path
 

@@ -35,6 +35,8 @@ class ScreenerEngine:
         self.pre_filter = pre_filter or PreFilter()
         self.scorer = scorer or Scorer(ScoreMode.HIT_COUNT)
         self.validator = DataValidator()
+        from indicators.engine import IndicatorEngine
+        self._engine = IndicatorEngine()
 
     def _evaluate_symbol(self, symbol: str, df: pd.DataFrame, scan_date: str, scan_time: str) -> ScreenResult | None:
         """
@@ -77,19 +79,15 @@ class ScreenerEngine:
         # Calculate ATR% if possible
         atr_pct = None
         if len(df) >= 14:
-            from indicators.engine import IndicatorEngine
             try:
-                eng = IndicatorEngine()
-                atr_df = eng.compute("atr", df)
+                atr_df = self._engine.compute("atr", df)
                 atr_val = atr_df["atr"].iloc[-1]
                 atr_pct = (atr_val / close) * 100
             except Exception:
                 pass
 
-        # Determine signal direction (default to BULLISH for now unless specified)
-        # We can extract direction from the rules if we want, but default to ANY/BULLISH
-        # For simplicity, we just say if it passed, it's a signal.
-        direction = SignalDirection.BULLISH
+        # Determine signal direction
+        direction = getattr(self.rule, "signal_direction", SignalDirection.BULLISH)
 
         result = ScreenResult(
             symbol=symbol,
@@ -127,15 +125,24 @@ class ScreenerEngine:
                 for sym, df in data_dict.items() if sym in self.config.symbols
             }
 
-            for future in as_completed(futures, timeout=self.config.timeout_per_symbol * len(futures)):
+            for future in as_completed(futures):
                 try:
-                    res = future.result()
+                    res = future.result(timeout=self.config.timeout_per_symbol)
                     if res is not None:
                         results.append(res)
+                except TimeoutError:
+                    sym = futures[future]
+                    logger.error(f"Timeout evaluating {sym}")
+                    errored += 1
                 except Exception as e:
                     sym = futures[future]
                     logger.error(f"Error evaluating {sym}: {e}")
                     errored += 1
+
+        elapsed = time.monotonic() - start_time
+        
+        passed_count = sum(1 for r in results if r.passed)
+        failed_count = len(results) - passed_count
 
         # Apply ranking
         ranked_results = self.scorer.rank(results, self.config.rank_by, self.config.rank_ascending)
@@ -143,11 +150,6 @@ class ScreenerEngine:
         # Apply max_results
         if self.config.max_results > 0:
             ranked_results = ranked_results[:self.config.max_results]
-
-        elapsed = time.monotonic() - start_time
-        
-        passed_count = sum(1 for r in ranked_results if r.passed)
-        failed_count = len(ranked_results) - passed_count
 
         return ScanSummary(
             scan_name=self.config.scan_name,
@@ -175,31 +177,28 @@ class ScreenerEngine:
         errored = 0
         symbols_scanned = 0
 
-        for sym, df in data_dict.items():
-            if sym not in self.config.symbols:
-                continue
-            
-            symbols_scanned += 1
-            # Filter dates
-            mask = (df.index >= start_date) & (df.index <= end_date)
-            eval_dates = df.index[mask]
-
-            for current_date in eval_dates:
-                # Slice data up to current_date
-                slice_df = df.loc[:current_date]
-                if len(slice_df) < self.config.min_bars:
+        with ThreadPoolExecutor(max_workers=self.config.n_workers) as executor:
+            futures = []
+            for sym, df in data_dict.items():
+                if sym not in self.config.symbols:
                     continue
+                symbols_scanned += 1
+                # Submit symbol to be evaluated for its history
+                futures.append(executor.submit(self._evaluate_historical_symbol, sym, df, start_date, end_date))
 
-                scan_date = current_date.strftime("%Y-%m-%d")
-                scan_time = "15:30:00" # EOD
-                
+            for future in as_completed(futures):
                 try:
-                    res = self._evaluate_symbol(sym, slice_df, scan_date, scan_time)
-                    if res is not None and res.passed: # In historical mode, typically we only keep passes
-                        all_results.append(res)
-                except Exception as e:
-                    logger.error(f"Historical error for {sym} on {scan_date}: {e}")
+                    res_list, err_count = future.result(timeout=self.config.timeout_per_symbol)
+                    all_results.extend(res_list)
+                    errored += err_count
+                except TimeoutError:
+                    logger.error("Timeout evaluating historical symbol")
                     errored += 1
+                except Exception as e:
+                    logger.error(f"Historical error: {e}")
+                    errored += 1
+
+        passed_count = sum(1 for r in all_results if r.passed)
 
         ranked_results = self.scorer.rank(all_results, self.config.rank_by, self.config.rank_ascending)
 
@@ -214,11 +213,39 @@ class ScreenerEngine:
             scan_date=f"{start_date} to {end_date}",
             elapsed_seconds=elapsed,
             symbols_scanned=symbols_scanned,
-            symbols_passed=len(ranked_results),
+            symbols_passed=passed_count,
             symbols_failed=0,
             symbols_errored=errored,
             results=ranked_results
         )
+
+    def _evaluate_historical_symbol(self, sym: str, df: pd.DataFrame, start_date: str, end_date: str) -> tuple[list[ScreenResult], int]:
+        """Evaluate a single symbol over its historical dates."""
+        res_list = []
+        err_count = 0
+        
+        mask = (df.index >= start_date) & (df.index <= end_date)
+        eval_dates = df.index[mask]
+
+        for current_date in eval_dates:
+            slice_df = df.loc[:current_date]
+            if len(slice_df) < self.config.min_bars:
+                continue
+
+            scan_date = current_date.strftime("%Y-%m-%d")
+            scan_time = "15:30:00"
+            
+            try:
+                res = self._evaluate_symbol(sym, slice_df, scan_date, scan_time)
+                if res is not None and res.passed:
+                    res_list.append(res)
+            except Exception as e:
+                logger.error(f"Historical error for {sym} on {scan_date}: {e}")
+                err_count += 1
+                
+        return res_list, err_count
+
+
 
     def process_tick(self, tick: TickData, df_history: pd.DataFrame) -> ScreenResult | None:
         """

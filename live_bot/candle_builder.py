@@ -161,27 +161,20 @@ class CandleBuilder:
             return
 
         # Ensure datetime index or column
-        if "datetime" in df.columns:
-            dt_col = df["datetime"]
-        elif isinstance(df.index, pd.DatetimeIndex):
-            dt_col = df.index.to_series()
-        else:
-            logger.warning(
-                f"[CandleBuilder:{self.symbol}] No datetime column/index found. Skipping seed."
-            )
-            return
-
-        # Reset index so iloc-based iteration is safe regardless of original index type
-        df = df.reset_index(drop=True)
-        if "datetime" in df.columns:
-            dt_col = df["datetime"]
-        elif isinstance(df.index, pd.DatetimeIndex):
-            dt_col = df.index.to_series().reset_index(drop=True)
-        else:
+        if "datetime" not in df.columns and isinstance(df.index, pd.DatetimeIndex):
+            df = df.reset_index()
+            # If the index had no name, reset_index names it "index"
+            if "index" in df.columns and "datetime" not in df.columns:
+                df = df.rename(columns={"index": "datetime"})
+                
+        if "datetime" not in df.columns:
             logger.warning(
                 f"[CandleBuilder:{self.symbol}] No datetime column/index found after reset. Skipping seed."
             )
             return
+
+        df = df.reset_index(drop=True)
+        dt_col = df["datetime"]
 
         count = 0
         for i in range(len(df)):
@@ -232,22 +225,18 @@ class CandleBuilder:
             minute_start = tick_dt.replace(second=0, microsecond=0)
 
             # Compute volume delta (Upstox sends cumulative day volume)
-            vol_delta = max(0, tick.volume - self._last_volume)
-            self._last_volume = tick.volume
+            vol_delta = max(0, (tick.volume or 0) - self._last_volume)
+            self._last_volume = tick.volume or 0
 
             # Use feed-provided candle OHLC if available and non-zero
-            use_feed_candle = (
-                tick.candle_open > 0
-                and tick.candle_high > 0
-                and tick.candle_low > 0
-                and tick.candle_close > 0
-            )
+            c1 = tick.get_1min_candle()
+            use_feed_candle = (c1 is not None and c1.open > 0)
 
             completed_candle = None
 
             if self._current is None:
                 # First tick ever — start a new candle
-                price = tick.candle_close if use_feed_candle else tick.ltp
+                price = c1.close if use_feed_candle else tick.ltp
                 self._current = MinuteCandle(minute_start, price, vol_delta)
 
             elif minute_start > self._current.minute_start:
@@ -268,16 +257,16 @@ class CandleBuilder:
                 )
 
                 # Start new candle for the new minute
-                price = tick.candle_close if use_feed_candle else tick.ltp
+                price = c1.close if use_feed_candle else tick.ltp
                 self._current = MinuteCandle(minute_start, price, vol_delta)
 
             else:
                 # Same minute — update the current candle
                 if use_feed_candle:
                     # Prefer feed OHLC for accuracy
-                    self._current.high  = max(self._current.high, tick.candle_high)
-                    self._current.low   = min(self._current.low, tick.candle_low)
-                    self._current.close = tick.candle_close
+                    self._current.high  = max(self._current.high, c1.high)
+                    self._current.low   = min(self._current.low, c1.low)
+                    self._current.close = c1.close
                 else:
                     self._current.update(tick.ltp, vol_delta)
 
@@ -335,7 +324,8 @@ class CandleRegistry:
 
     def __init__(self):
         self._builders: Dict[str, CandleBuilder] = {}
-        self._lock = threading.Lock()
+        self._last_tick_at: Dict[str, datetime] = {}
+        self._lock = threading.RLock()
 
     def register(
         self,
@@ -343,21 +333,33 @@ class CandleRegistry:
         seed_df: Optional[pd.DataFrame] = None,
         max_history_bars: int = 500,
     ) -> CandleBuilder:
-        """
-        Register a symbol and optionally seed it with historical data.
-        Safe to call multiple times for the same symbol.
-        """
         with self._lock:
             if symbol not in self._builders:
                 self._builders[symbol] = CandleBuilder(symbol, seed_df, max_history_bars)
+                self._last_tick_at[symbol] = datetime.now(tz=IST)
                 logger.info(f"[CandleRegistry] Registered symbol: {symbol}")
             return self._builders[symbol]
+            
+    def deregister(self, symbol: str) -> bool:
+        with self._lock:
+            if symbol in self._builders:
+                del self._builders[symbol]
+                self._last_tick_at.pop(symbol, None)
+                return True
+            return False
+            
+    def cleanup_stale(self, max_idle_seconds: float = 3600.0) -> list[str]:
+        stale = []
+        now = datetime.now(tz=IST)
+        with self._lock:
+            for sym, last_ts in list(self._last_tick_at.items()):
+                if (now - last_ts).total_seconds() > max_idle_seconds:
+                    stale.append(sym)
+            for sym in stale:
+                self.deregister(sym)
+        return stale
 
     def on_tick(self, symbol: str, tick: TickData) -> Optional[MinuteCandle]:
-        """
-        Route a tick to the correct CandleBuilder.
-        If the symbol is not registered, it is auto-registered (no seed).
-        """
         with self._lock:
             if symbol not in self._builders:
                 logger.warning(
@@ -365,10 +367,10 @@ class CandleRegistry:
                     "Auto-registering without seed data."
                 )
                 self._builders[symbol] = CandleBuilder(symbol)
-        return self._builders[symbol].on_tick(tick)
+            self._last_tick_at[symbol] = datetime.now(tz=IST)
+            return self._builders[symbol].on_tick(tick)
 
     def get_df(self, symbol: str) -> pd.DataFrame:
-        """Return the full OHLCV DataFrame for a symbol."""
         with self._lock:
             builder = self._builders.get(symbol)
         if builder is None:
@@ -377,7 +379,6 @@ class CandleRegistry:
         return builder.get_candles_df()
 
     def get_new_candles(self, symbol: str) -> List[dict]:
-        """Return newly completed candles since last check for a symbol."""
         with self._lock:
             builder = self._builders.get(symbol)
         if builder is None:
@@ -385,7 +386,6 @@ class CandleRegistry:
         return builder.get_new_candles()
 
     def bar_counts(self) -> Dict[str, int]:
-        """Return {symbol: bar_count} for all registered symbols."""
         with self._lock:
             return {sym: b.bar_count() for sym, b in self._builders.items()}
 

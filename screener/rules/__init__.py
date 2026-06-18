@@ -22,6 +22,7 @@ from screener.rules.volume import (
 from screener.rules.pattern import (
     CandlePatternRule, ChartPatternRule, TrendStructureRule
 )
+from screener.rules.strategy import StrategyRule, StrategyConfluenceRule
 from screener.rules.serializer import RuleSerializer, build_rule_from_dict
 
 __all__ = [
@@ -35,5 +36,6 @@ __all__ = [
     "VolumeBreakoutRule", "VolumeDeclineRule", "VolumeRatioRule",
     "AccumulationRule", "DistributionRule",
     "CandlePatternRule", "ChartPatternRule", "TrendStructureRule",
+    "StrategyRule", "StrategyConfluenceRule",
     "RuleSerializer", "build_rule_from_dict"
 ]
