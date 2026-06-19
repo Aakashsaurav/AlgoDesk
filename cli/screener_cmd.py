@@ -42,7 +42,7 @@ def run_screener(
     symbols: Optional[str] = typer.Option(None, "--symbols", help="Comma separated symbols"),
     universe: str = typer.Option("nifty50", "--universe", help="Universe name"),
     mode: str = typer.Option("eod", "--mode", help="Scan mode"),
-    export: bool = typer.Option(False, "--export", is_flag=True, help="Export results")
+    export: bool = typer.Option(False, "--export", help="Export results")
 ):
     if not strategy and not rule:
         console.print("[red]Must provide either --strategy or --rule[/red]")
@@ -87,7 +87,7 @@ def schedule_screener(
     symbols: str = typer.Option(..., "--symbols", help="Comma separated symbols"),
     time_str: str = typer.Option("15:35", "--time", help="Run time (HH:MM)"),
     days: str = typer.Option("weekdays", "--days", help="Run days"),
-    notify: bool = typer.Option(False, "--notify", is_flag=True, help="Send notification")
+    notify: bool = typer.Option(False, "--notify", help="Send notification")
 ):
     from scheduler.runner import AlgoDeskScheduler
     from scheduler.job_store import JobStore

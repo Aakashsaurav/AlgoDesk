@@ -77,9 +77,9 @@ def validate_data(
 
 @data_app.command("universe")
 def manage_universe(
-    list_univ: bool = typer.Option(False, "--list", is_flag=True, help="List available universes"),
-    refresh: bool = typer.Option(False, "--refresh", is_flag=True, help="Update from NSE website"),
-    export: bool = typer.Option(False, "--export", is_flag=True, help="Export to CSV")
+    list_univ: bool = typer.Option(False, "--list", help="List available universes"),
+    refresh: bool = typer.Option(False, "--refresh", help="Update from NSE website"),
+    export: bool = typer.Option(False, "--export", help="Export to CSV")
 ):
     if refresh:
         console.print("[green]Refreshed universes from NSE website.[/green]")

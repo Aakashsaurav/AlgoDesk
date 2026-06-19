@@ -63,7 +63,7 @@ def inspect_indicator(indicator_name: str = typer.Argument(..., help="Indicator 
 
 @indicator_app.command("patterns")
 def list_patterns(
-    talib_only: bool = typer.Option(False, "--talib-only", is_flag=True, help="Show only TA-Lib patterns")
+    talib_only: bool = typer.Option(False, "--talib-only", help="Show only TA-Lib patterns")
 ):
     table = Table(title="Candlestick Patterns")
     table.add_column("Pattern", style="cyan")

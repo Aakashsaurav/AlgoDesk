@@ -40,8 +40,8 @@ def run_backtest(
     start_date: str = typer.Option(..., "--start-date", help="YYYY-MM-DD"),
     end_date: str = typer.Option(..., "--end-date", help="YYYY-MM-DD"),
     capital: float = typer.Option(100000.0, "--capital", help="Initial capital"),
-    plot: bool = typer.Option(False, "--plot", is_flag=True, help="Plot results"),
-    export: bool = typer.Option(False, "--export", is_flag=True, help="Export results to CSV/HTML")
+    plot: bool = typer.Option(False, "--plot", help="Plot results"),
+    export: bool = typer.Option(False, "--export", help="Export results to CSV/HTML")
 ):
     console.print(f"[cyan]Running backtest for {strategy} on {symbols}[/cyan]")
     console.print(f"[cyan]Period: {start_date} to {end_date} | Capital: ₹{capital:,.2f}[/cyan]")
