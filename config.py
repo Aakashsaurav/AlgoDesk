@@ -124,6 +124,13 @@ class AppConfig:
     MAX_PORTFOLIO_DRAWDOWN: float = float(os.getenv("MAX_PORTFOLIO_DRAWDOWN", "20.0"))
     PER_TRADE_RISK_PERCENT: float = float(os.getenv("PER_TRADE_RISK_PERCENT", "1.5"))
 
+    # ── Live Trading Safety ──────────────────────────────────────────────────
+    MAX_ORDER_VALUE: float = float(os.getenv("MAX_ORDER_VALUE", "50000"))
+    MAX_DAILY_ORDERS: int = int(os.getenv("MAX_DAILY_ORDERS", "20"))
+    ALLOWED_SYMBOLS: list[str] = [s.strip() for s in os.getenv("ALLOWED_SYMBOLS", "").split(",") if s.strip()]
+    LIVE_TRADING_HOURS_ONLY: bool = True
+    REQUIRE_BACKTEST_BEFORE_LIVE: bool = False
+
     # ── Trading mode ─────────────────────────────────────────────────────────
     PAPER_TRADE: bool = os.getenv("PAPER_TRADE", "True").lower() == "true"
 

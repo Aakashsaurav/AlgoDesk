@@ -4,6 +4,8 @@ from datetime import datetime
 from typing import Optional
 
 from config import IST
+from config import config
+import pytz
 
 import live_bot.state as _state_module
 from live_bot.state import (
@@ -12,6 +14,7 @@ from live_bot.state import (
     ClosedTrade,
 )
 from live_bot.orders.base import BrokerInterface
+from notifications.dispatcher import notify
 from backtester.commission import IndianEquityCommission, Segment
 
 def _get_state():
@@ -217,7 +220,9 @@ class PaperBroker(BrokerInterface):
                 entry_commission = commission,
             )
             _get_state().add_position(position)
-            _get_state().log_activity("TRADE_ENTRY", f"📈 BUY {order.symbol} x{order.quantity} @ ₹{fill_price:.2f} | SL={stop_loss} TP={take_profit}")
+            msg = f"📈 BUY {order.symbol} x{order.quantity} @ ₹{fill_price:.2f} | SL={stop_loss} TP={take_profit}"
+            _get_state().log_activity("TRADE_ENTRY", msg)
+            notify("TRADE_ENTRY", f"Trade Entry: {order.symbol}", msg, symbol=order.symbol)
 
         elif order.action in ("SELL", "COVER"):
             self._close_position_on_fill(order, fill_price, commission)
@@ -238,7 +243,9 @@ class PaperBroker(BrokerInterface):
                 entry_commission = commission,
             )
             _get_state().add_position(position)
-            _get_state().log_activity("TRADE_ENTRY", f"📉 SHORT {order.symbol} x{order.quantity} @ ₹{fill_price:.2f}")
+            msg = f"📉 SHORT {order.symbol} x{order.quantity} @ ₹{fill_price:.2f}"
+            _get_state().log_activity("TRADE_ENTRY", msg)
+            notify("TRADE_ENTRY", f"Trade Entry: {order.symbol}", msg, symbol=order.symbol)
 
         return True
 
@@ -273,7 +280,9 @@ class PaperBroker(BrokerInterface):
         _get_state().record_closed_trade(trade)
 
         emoji = "✅" if pnl_net >= 0 else "🔴"
-        _get_state().log_activity("TRADE_EXIT", f"{emoji} EXIT {order.symbol} x{order.quantity} @ ₹{fill_price:.2f} | P&L: ₹{pnl_net:+.2f} ({pnl_pct:+.2f}%)", level="INFO" if pnl_net >= 0 else "WARNING")
+        msg = f"{emoji} EXIT {order.symbol} x{order.quantity} @ ₹{fill_price:.2f} | P&L: ₹{pnl_net:+.2f} ({pnl_pct:+.2f}%)"
+        _get_state().log_activity("TRADE_EXIT", msg, level="INFO" if pnl_net >= 0 else "WARNING")
+        notify("TRADE_EXIT", f"Trade Exit: {order.symbol}", msg, symbol=order.symbol)
 
     def _exit_position(self, symbol: str, exit_price: float, reason: str) -> None:
         position = _get_state().get_position(symbol)
@@ -309,4 +318,7 @@ class PaperBroker(BrokerInterface):
         _get_state().record_closed_trade(trade)
 
         emoji = "✅" if pnl_net >= 0 else "🔴"
-        _get_state().log_activity("TRADE_EXIT", f"{emoji} {reason}: {symbol} x{position.quantity} @ ₹{fill_px:.2f} | P&L: ₹{pnl_net:+.2f} ({pnl_pct:+.2f}%)", level="INFO" if pnl_net >= 0 else "WARNING")
+        event_type = "STOP_LOSS" if reason == "STOP_LOSS" else "TRADE_EXIT"
+        msg = f"{emoji} EXIT {symbol} x{position.quantity} @ ₹{fill_px:.2f} | P&L: ₹{pnl_net:+.2f} ({pnl_pct:+.2f}%) | Reason: {reason}"
+        _get_state().log_activity(event_type, msg, level="INFO" if pnl_net >= 0 else "WARNING")
+        notify(event_type, f"Trade Exit: {symbol}", msg, symbol=symbol)

@@ -43,7 +43,7 @@ except ImportError:  # pragma: no cover - dependency optional in tests
 
 from config import config, IST
 from live_bot.candle_builder import candle_registry
-
+from notifications.dispatcher import notify
 from live_bot.state import TickData, state as live_state
 
 logger = logging.getLogger(__name__)
@@ -405,6 +405,7 @@ class MarketFeed(BaseMarketFeed):
         logger.critical("[MarketFeed] %s", error_msg)
         live_state.set_market_feed_status(False)
         live_state.log_activity("FEED_RECONNECT_FAILED", error_msg, level="CRITICAL")
+        notify("SYSTEM_ALERT", "WebSocket Disconnected", error_msg, priority="CRITICAL")
         live_state.activate_kill_switch("Market feed permanently disconnected.")
 
     def subscribe(self, instrument_keys: List[str]) -> None:
@@ -579,9 +580,9 @@ class RestMarketFeed(BaseMarketFeed):
                     )
                     if self._consecutive_failures >= self._max_consecutive_failures:
                         live_state.set_market_feed_status(False)
-                        live_state.activate_kill_switch(
-                            "REST market feed failed repeatedly."
-                        )
+                        msg = "REST market feed failed repeatedly."
+                        notify("SYSTEM_ALERT", "REST Feed Failed", msg, priority="CRITICAL")
+                        live_state.activate_kill_switch(msg)
                         return
 
             if any_success:

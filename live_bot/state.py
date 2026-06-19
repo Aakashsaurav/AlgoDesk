@@ -9,6 +9,7 @@ import logging
 from collections import deque
 from datetime import datetime, date
 from typing import Deque, Dict, List, Optional
+from notifications.dispatcher import notify
 from config import IST
 
 # Import the refactored data models
@@ -281,10 +282,15 @@ class LiveState:
             msg = f"🔴 KILL SWITCH ACTIVATED{f': {reason}' if reason else ''}"
             logger.critical(msg)
             self._log_activity("KILL_SWITCH", msg, level="CRITICAL")
+            notify("KILL_SWITCH", "KILL SWITCH ACTIVATED", msg, priority="CRITICAL")
 
     def set_daily_loss_hit(self) -> None:
         with self._lock:
             self._daily_loss_hit = True
+            msg = "⚠️ Daily loss limit reached."
+            logger.warning(msg)
+            self._log_activity("RISK_ALERT", msg, level="WARNING")
+            notify("RISK_ALERT", "Risk Alert", msg, priority="WARNING")
 
     def set_max_dd_hit(self) -> None:
         with self._lock:
